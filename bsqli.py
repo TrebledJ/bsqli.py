@@ -1,5 +1,7 @@
 #!/usr/bin/python3
-# Run `python bsqli.py -h` for help.
+# Boolean-based Blind SQLi tool by TrebledJ.
+# Help: python bsqli.py -h
+# Docs: python bsqli.py --docs
 
 import requests
 import sys
