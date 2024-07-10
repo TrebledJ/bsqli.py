@@ -506,7 +506,7 @@ def main():
     1. Manually craft a Boolean-Based Blind SQLi PoC. The request should contain
        an SQLi payload with a condition (e.g. 1=1). There should be distinct
        responses between true and false responses, either in the status code or
-       responsse body.
+       response body.
 
     2. Separate the SQLi payload (e.g. `' or '1'='1`) from the GET/POST params,
        and replace it with `{payload}`. Move your payload to the `--payload`
