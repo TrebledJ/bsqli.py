@@ -631,7 +631,9 @@ def main():
     Request:
 
     ```http
-    POST / HTTP/1.1 Host: vulnerable.site Content-Length: ...
+    POST / HTTP/1.1
+    Host: vulnerable.site
+    Content-Length: ...
     Content-Type: application/x-www-form-urlencoded
 
     login=a&password='%20or%20(1=1)%20--%20
