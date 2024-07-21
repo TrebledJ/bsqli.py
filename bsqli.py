@@ -374,11 +374,17 @@ class SQLStringBrute:
         return str(num)
 
 
+@dataclass
+class SQLOptions:
+    cast_to_string: bool
+    cast_to_string_length: int
+
 
 @dataclass
 class Query:
     brute: SQLStringBrute
     variant: SQLVariant
+    options: SQLOptions
 
     def query(self, sql, info='information'):
         console.print(f"(+) retrieving {info}...")
@@ -388,15 +394,20 @@ class Query:
             print('Detected `count` query. Switching to (faster) numeric brute.')
             res = self.brute.get_number(f'({sql})')
         else:
-            match self.brute.dbms:
-                case DBMS.MySQL:
-                    res = self.brute.get_string(f'cast(({sql}) as char(2048))')
-                case DBMS.SQLServer:
-                    res = self.brute.get_string(f'cast(({sql}) as varchar(2048))')
-                case DBMS.OracleSQL:
-                    res = self.brute.get_string(f'cast(({sql}) as varchar(2048))')
-                case _:
-                    raise NotImplementedError('')
+            if self.options.cast_to_string:
+                cast_len = self.options.cast_to_string_length
+                match self.brute.dbms:
+                    case DBMS.MySQL:
+                        res = self.brute.get_string(f'cast(({sql}) as char({cast_len}))')
+                    case DBMS.SQLServer:
+                        res = self.brute.get_string(f'cast(({sql}) as varchar({cast_len}))')
+                    case DBMS.OracleSQL:
+                        res = self.brute.get_string(f'cast(({sql}) as varchar({cast_len}))')
+                    case _:
+                        print('Warning: cast-to-string has not been implemented for the specified DBMS. Defaulting to normal brute.')
+                        res = self.brute.get_string(f'{sql}')
+            else:
+                res = self.brute.get_string(f'{sql}')
 
         end = time.time()
 
@@ -696,6 +707,11 @@ def main():
     parser.add_argument('-betn', '--boolean-error-if-text-not-contains', action='append', default=[],
                         help='If the provided text was NOT encountered in the response body, mark the query as an error. Accepts multiple arguments.')
     
+    parser.add_argument('--cast-to-string', action='store_true',
+                        help='Cast the target output to varchar(2048) string. This allows numbers to be output as well, since normally we can\'t SUBSTRING a number.')
+    parser.add_argument('--cast-to-string-length', default=2048, type=int,
+                        help='The length of the string to cast to. If you specify this, you should also enable --cast-to-string.')
+    
     # Primary console colour.
     parser.add_argument('--color-primary', default=Palette.primary, help=argparse.SUPPRESS)
     # Highlight console colour.
@@ -770,7 +786,12 @@ def main():
         max_threads=args.threads,
     )
     
-    query = Query(brute, variant=variant_class[args.dbms])
+    sql_options = SQLOptions(
+        cast_to_string=args.cast_to_string,
+        cast_to_string_length=args.cast_to_string_length,
+    )
+    
+    query = Query(brute, variant=variant_class[args.dbms], options=sql_options)
 
     while 1:
         try:
