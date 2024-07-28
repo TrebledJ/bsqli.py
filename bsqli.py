@@ -23,9 +23,9 @@ import copy
 import random
 
 
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 
-
+logging.basicConfig(format='[%(levelname)s] %(message)s')
 urllib3.disable_warnings()
 console = Console()
 
@@ -144,7 +144,7 @@ class Sender:
     headers: Dict
     timeout: int = 5
     allow_redirects: bool = False
-    keep_alive: bool = False
+    # keep_alive: bool = False
 
     session: requests.Session = None
 
@@ -499,10 +499,10 @@ def make_headers(args):
     if args.data and 'Content-Type' not in headers:
         headers['Content-Type'] = 'application/x-www-form-urlencoded'
     
-    if args.keep_alive:
-        headers['Connection'] = 'keep-alive'
-    else:
-        headers['Connection'] = 'close'
+    # if args.keep_alive:
+    #     headers['Connection'] = 'keep-alive'
+    # else:
+    #     headers['Connection'] = 'close'
     
     return headers
 
@@ -696,7 +696,7 @@ def main():
 
     parser.add_argument('--proxy', default=None, help='Send requests to a proxy. Example: http://127.0.0.1:8080.')
     parser.add_argument('--follow-redirects', action='store_true', help='Follows redirects in responses.')
-    parser.add_argument('--keep-alive', action='store_true', help='Enables `Connection: keep-alive`.')
+    # parser.add_argument('--keep-alive', action='store_true', help='Enables `Connection: keep-alive`.')
     parser.add_argument('--max-retries', default=3, type=int, help='Maximum number of connection retries to attempt.')
 
     parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.SQLite, DBMS.OracleSQL], help='The database management system.')
