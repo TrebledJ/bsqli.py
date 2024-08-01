@@ -18,6 +18,8 @@ This script requires Python 3.10+, requests, rich, and prompt_toolkit.
 pip install requests rich prompt_toolkit
 ```
 
+Apart from that, just download/copy the file and you should be good to go!
+
 ## Usage ##
 
 1. Manually craft a Boolean-Based Blind SQLi PoC. The request should contain
