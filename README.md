@@ -1,14 +1,14 @@
 # bsqli.py
 A nifty little boolean-based blind SQLi script for OSCP and real-life engagements.
 
-This tool is primarily used to enumerate metadata (SQL version, DB name, host name) and table data. For instance, there may be some juicy credentials residing in some user table. Or we may want to simply perform a Proof-of-Concept for a client by grabbing the version banner.
+This tool abstracts the tedious process of brute-forcing strings; and is primarily used to enumerate metadata (SQL version, DB name, host name) and tables. For instance, there may be some juicy credentials residing in some user table. Or we may want to simply perform a Proof-of-Concept for a client by grabbing the version banner.
 
-The internals are pretty simple, but packaged into a flexible ~~battlestation~~ interface. Basically, we inject SELECT subqueries; and since this is boolean SQLi, we can deduce each character using binary search.
+The internals are pretty simple, but packaged into a flexible ~~battlestation~~ interface. Basically, we run `ASCII(SUBSTRING(query, idx, 1))` to obtain the numeric value of each character, then use binary search to deduce each value.
 
 > [!WARNING]  
 > This tool is intended for authorised and ethical purposes only. The developers of this tool are not liable for any damages, legal consequences, or loss of data resulting from the use or misuse of this tool. Users are solely responsible for ensuring compliance with applicable laws and regulations.
 
-To be honest, similar techniques are executed by SQLmap. This is simply an alternative tool targeted towards boolean-based blind injection focusing on more manual testing (for determining parameters) and less guesswork.
+Similar techniques are executed by SQLmap, so this tool can be considered a subset. But unlike SQLmap, there is no automatic exploitation or discovery built in. Instead, the user is asked to manually test and specify the necessary parameters, including the DBMS, injected parameter, and boolean conditions. As long as you understand the basic idea, this tool should be safe to use during OSCP and CTFs.
 
 ## Install ##
 
