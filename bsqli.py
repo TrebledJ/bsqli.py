@@ -23,7 +23,7 @@ import copy
 import random
 
 
-VERSION = '0.5.2'
+VERSION = '0.5.3'
 
 logging.basicConfig(format='[%(levelname)s] %(message)s')
 urllib3.disable_warnings()
@@ -76,7 +76,7 @@ class ResultError:
 
 class ResultParser:
     @abstractmethod
-    def parse(self, resp) -> Any:
+    def parse(self, resp) -> Any | ResultError:
         ...
 
 
@@ -143,12 +143,15 @@ class Sender:
     payload: SQLPayload
     data: Optional[str] = None
 
+    # Request settings.
     headers: Dict
     timeout: int = 5
     allow_redirects: bool = False
     # keep_alive: bool = False
-
+    
     session: requests.Session = None
+    
+    retries_on_error: int = 0   # Number of retries if a response was marked as an error.
 
     result_parser: ResultParser
 
@@ -160,13 +163,19 @@ class Sender:
         logging.debug(f' | url       : {self.url}')
         logging.debug(f' | data      : {self.data}')
         
-        try:
-            resp = self.make_request(url, data)
-            # print('status code:', resp.status_code, f'   text: {len(resp.text)}c')
-        except ConnectionError as e:
-            raise e
-        
-        return self.result_parser.parse(resp)
+        for attempt in range(self.retries_on_error + 1):
+            try:
+                resp = self.make_request(url, data)
+                # print('status code:', resp.status_code, f'   text: {len(resp.text)}c')
+            except ConnectionError as e:
+                raise e
+            
+            result = self.result_parser.parse(resp)
+            if isinstance(result, ResultError):
+                logging.info(f'error encountered: {result.reason}')
+                logging.info(f'retrying... ({attempt+1} / {self.retries_on_error+1})')
+            else:
+                return result
 
     def make_payload(self, payload_params: dict):
         raw_payload = self.payload.construct(payload_params)
@@ -700,7 +709,7 @@ def main():
     parser.add_argument('--proxy', default=None, help='Send requests to a proxy. Example: http://127.0.0.1:8080.')
     parser.add_argument('--follow-redirects', action='store_true', help='Follows redirects in responses.')
     # parser.add_argument('--keep-alive', action='store_true', help='Enables `Connection: keep-alive`.')
-    parser.add_argument('--max-retries', default=3, type=int, help='Maximum number of connection retries to attempt.')
+    parser.add_argument('--max-retries', default=3, type=int, help='Maximum number of HTTP connection retries to attempt.')
 
     parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.SQLite, DBMS.OracleSQL], help='The database management system.')
     parser.add_argument('--strategy', choices=["B"], default='B',
@@ -723,6 +732,8 @@ def main():
                         help='If the provided text is encountered in the response body, mark the query as an error. Accepts multiple arguments.')
     parser.add_argument('-betn', '--boolean-error-if-text-not-contains', action='append', default=[],
                         help='If the provided text was NOT encountered in the response body, mark the query as an error. Accepts multiple arguments.')
+    parser.add_argument('--max-retries-on-error', type=int, default=3,
+                        help='Maximum number of retries if a response is marked as an error.')
     
     parser.add_argument('--cast-to-string', action='store_true',
                         help='Cast the target output to varchar(2048) string. This allows numbers and other data types to be treated as strings, so that our standard ASCII-SUBSTRING algorithm can work.')
@@ -737,7 +748,7 @@ def main():
     # Highlight console colour.
     parser.add_argument('--color-highlight', default=Palette.highlight, help=argparse.SUPPRESS)
     
-    # These don't really need to be changed, unless you want to customise your queries.
+    # payload/cond token don't really need to be changed, unless you want to customise your queries.
     # Make sure to escape raw { and } with {{ and }}.
 
     # The token to substitute injection payloads.
@@ -790,6 +801,8 @@ def main():
             )
         case _:
             raise NotImplementedError()
+        
+    assert args.max_retries_on_error >= 0, 'Retries on error should be non-negative.'
 
     sender = Sender(
         url=args.url,
@@ -800,6 +813,7 @@ def main():
         timeout=args.timeout,
         allow_redirects=args.follow_redirects,
         session=make_session(args.max_retries, args.proxy),
+        retries_on_error=args.max_retries_on_error,
         result_parser=parser,
     )
 
