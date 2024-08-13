@@ -14,6 +14,9 @@ The internals are pretty simple, but packaged into a flexible ~~battlestation~~ 
 
 Similar techniques are executed by SQLmap, so this tool can be considered a subset. But unlike SQLmap, there is no automatic exploitation or discovery built in. Instead, the user is asked to manually test and specify the necessary parameters, including the DBMS, injected parameter, and boolean conditions. As long as you understand the basic idea, this tool should be safe to use during OSCP and CTFs.
 
+Check out [my writeup which reviews boolean-based SQLi and explores some exploitation + automation tricks used in this script](https://trebledj.me/posts/automating-boolean-sql-injection-with-python/).
+
+
 ## Install ##
 
 This script requires Python 3.10+, requests, rich, and prompt_toolkit.
