@@ -30,7 +30,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-VERSION = '0.5.4'
+VERSION = '0.5.5'
 
 logging.basicConfig(format='[%(levelname)s] %(message)s')
 urllib3.disable_warnings()
@@ -163,10 +163,11 @@ class Sender:
     result_parser: ResultParser
 
     def send(self, **payload_params) -> Any:
-        quoted_payload, url, data = self.make_payload(payload_params)
+        # sender.send(cond='1=1')
+        url, data = self.make_payload(payload_params)
 
         logging.debug(f'requesting...')
-        logging.debug(f' | payload   : {quoted_payload}')
+        # logging.debug(f' | payload   : {quoted_payload}')
         logging.debug(f' | url       : {self.url}')
         logging.debug(f' | data      : {self.data}')
         
@@ -185,19 +186,26 @@ class Sender:
                 return result
 
     def make_payload(self, payload_params: dict):
-        raw_payload = self.payload.construct(payload_params)
         url, data = self.url, self.data
         
-        if PAYLOAD_TOKEN in self.url:
+        if PAYLOAD_TOKEN in url:
+            raw_payload = self.payload.construct(payload_params)
             quoted_payload = quote_plus(raw_payload)
-            url = self.url.format_map(FormatMinimal(payload=quoted_payload))
-        elif self.data and PAYLOAD_TOKEN in self.data:
+            url = url.format_map(FormatMinimal(payload=quoted_payload))
+        elif data and PAYLOAD_TOKEN in data:
+            raw_payload = self.payload.construct(payload_params)
             quoted_payload = quote(raw_payload)
-            data = self.data.format_map(FormatMinimal(payload=quoted_payload))
+            data = data.format_map(FormatMinimal(payload=quoted_payload))
+        elif COND_TOKEN in url:
+            # PAYLOAD_TOKEN is not found. Substitute COND_TOKEN directly.
+            url = url.format_map(FormatMinimal(**payload_params))
+        elif data and COND_TOKEN in data:
+            # PAYLOAD_TOKEN is not found. Substitute COND_TOKEN directly.
+            data = data.format_map(FormatMinimal(**payload_params))
         else:
             raise RuntimeError('payload token not found')
         
-        return quoted_payload, url, data
+        return url, data
     
     def make_request(self, url, data):
         return self.session.request(self.method, url, data=data,
@@ -589,15 +597,6 @@ def main():
     # Highlight console colour.
     parser.add_argument('--color-highlight', default=Palette.highlight, help=argparse.SUPPRESS)
     
-    # payload/cond token don't really need to be changed, unless you want to customise your queries.
-    # Make sure to escape raw { and } with {{ and }}.
-
-    # The token to substitute injection payloads.
-    parser.add_argument('--payload-token', default=PAYLOAD_TOKEN, help=argparse.SUPPRESS)
-
-    # The token to substitute conditions into boolean SQLi queries.
-    parser.add_argument('--cond-token', default=COND_TOKEN, help=argparse.SUPPRESS)
-
     args = parser.parse_args()
 
     if args.version:
@@ -616,10 +615,14 @@ def main():
         case _:
             logging.getLogger().setLevel(logging.DEBUG)
             
-    PAYLOAD_TOKEN = args.payload_token
-    COND_TOKEN = args.cond_token
+    # PAYLOAD_TOKEN = args.payload_token
+    # COND_TOKEN = args.cond_token
     Palette.primary = args.color_primary
     Palette.highlight = args.color_highlight
+    
+    assert args.url.startswith('http://') or args.url.startswith('https://'), 'Expected URL to start with http:// or https://.'
+    assert args.max_retries_on_error >= 0, 'Retries on error should be non-negative.'
+    assert args.dbms is not None, 'Expected DBMS parameter. Please specify the DBMS with --dbms.'
 
     console.print()
     console.print('-- @TrebledJ/bsqli.py --', style=Palette.primary)
@@ -639,8 +642,6 @@ def main():
         case _:
             raise NotImplementedError()
         
-    assert args.max_retries_on_error >= 0, 'Retries on error should be non-negative.'
-
     sender = Sender(
         url=args.url,
         method=args.method,
@@ -710,5 +711,11 @@ def main():
         except KeyboardInterrupt:
             print("Received KeyboardInterrupt during enumeration.")
 
-rc = main()
+try:
+    rc = main()
+except AssertionError as e:
+    print()
+    print(e)
+    sys.exit(1)
+    
 sys.exit(rc if rc else 0)
