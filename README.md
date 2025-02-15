@@ -276,7 +276,7 @@ Try the script on the demo server (requires Python and Flask, `pip install flask
 Clone the repo and run the following commands in two separate terminals:
 ```sh
 python demo/server.py 127.0.0.1 8081
-python ./bsqli.py -u http://127.0.0.1:8081/login -X POST -bttc success --dbms SQLite -t 1 --payload "'OR({cond})OR'" --data 'username={payload}&password='
+python ./bsqli.py -u http://127.0.0.1:8081/login -X POST -bttc success -betc error --dbms SQLite -t 1 --payload "'OR({cond})OR'" --data 'username={payload}&password='
 ```
 
 Then run sqli commands:

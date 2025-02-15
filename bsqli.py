@@ -177,7 +177,7 @@ class Sender:
                 else:
                     logger.info(f"cond: {cond}")
 
-            logger.debug(f'Attempt #{attempt+1}')
+            logger.debug(f'Attempt #{attempt+1} / {self.retries_on_error+1}')
 
             try:
                 resp = self.make_request(url, data)
@@ -190,7 +190,7 @@ class Sender:
                 if attempt == self.retries_on_error:
                     # This is the LAST. STRAW.
                     raise result
-                logger.info(f'Retrying... ({attempt+1} / {self.retries_on_error+1})')
+                logger.info(f'Retrying... ({attempt+1} / {self.retries_on_error})')
             else:
                 return result
         
