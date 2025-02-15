@@ -181,7 +181,7 @@ class Sender:
 
             try:
                 resp = self.make_request(url, data)
-            except ConnectionError as e:
+            except httpx.TimeoutException as e:
                 raise e
             
             result = self.result_parser.parse(resp)
@@ -297,13 +297,13 @@ def mk_thread_delay(int_evt: Event, resume_evt: Event, quit_evt: Event, main_thr
 
     signal.signal(signal.SIGTERM, handle_int_signal) # Unix-like
     signal.signal(signal.SIGINT, handle_int_signal)  # Windows
-    signal.signal(signal.SIGABRT, lambda signo, _frame: print('SIGABRT called')) 
-    try: signal.signal(signal.SIGQUIT, lambda signo, _frame: print('SIGQUIT called')) 
-    except AttributeError: pass
+    # signal.signal(signal.SIGABRT, lambda signo, _frame: print('SIGABRT called')) 
+    # try: signal.signal(signal.SIGQUIT, lambda signo, _frame: print('SIGQUIT called')) 
+    # except AttributeError: pass
     # try: signal.signal(signal.SIGKILL, lambda signo, _frame: print('SIGKILL called')) 
     # except AttributeError: pass
-    try: signal.signal(signal.SIGBREAK, lambda signo, _frame: print('SIGBREAK called')) 
-    except AttributeError: pass
+    # try: signal.signal(signal.SIGBREAK, lambda signo, _frame: print('SIGBREAK called')) 
+    # except AttributeError: pass
     
     def delay(sec):
         if threading.current_thread() is threading.main_thread():
@@ -904,11 +904,11 @@ def main():
             match sql.split():
                 case ["q"] | ["quit"]:
                     break
-                case ["h"] | ["help"]:
+                case ["help"]:
                     console.print("Commands:")
-                    console.print(" [bold green]h/help        [/]- this menu")
+                    console.print(" [bold green]help          [/]- this menu")
                     console.print(" [bold green]q/quit/Ctrl+D [/]- exit program")
-                    console.print(" [bold green]c/config        [/]- configure settings dynamically")
+                    console.print(" [bold green]c/config      [/]- configure settings dynamically")
                     console.print("")
                     console.print("To pause the program during a run, hit [green]Ctrl+C[/]. This enters config mode.")
                     console.print("Then enter 'c'/'continue' to resume execution, or 'q'/'quit' to cancel.")
@@ -954,7 +954,9 @@ def main():
                     console.print("Use 'config' to enter config mode first.")
                 case _:
                     query.query(sql)
-        except NotImplementedError:
+        except httpx.TimeoutException as e:
+            console.print(f"Looks like the request timed out: {e}.")
+        except NotImplementedError as e:
             console.print(f"Received NotImplementedError during task: {e}.")
         except (KeyboardInterrupt, EOFError, ThreadInterruptException) as e:
             console.print(f"Received {e.__class__.__name__} during task.")
@@ -963,7 +965,7 @@ def main():
 def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -> bool | None:
     def help():
         console.print('Usage:')
-        console.print('  [green]set[/] \\[thread|delay|timeout] <value>')
+        console.print('  [green]set[/] \\[thread|delay|timeout|loglevel] <value>')
         if paused_from_task:
             console.print('  [green]continue / c[/]')
         console.print('  [green]quit / q[/]')
@@ -978,7 +980,9 @@ def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -
             match line.split():
                 case ['set', 'thread', value]:
                     if paused_from_task:
-                        console.print("You can't change the number of threads while a task is running.")
+                        console.print("The new number of threads will be reflected once a new task has started.")
+                        console.print("If you want this to take effect now, stop the current task and run the SQLi command again.")
+
                     brute.max_threads = max(int(value), 1)
                 case ['set', 'delay', value]:
                     brute.delay = max(float(value), 0.0)

@@ -52,4 +52,7 @@ def login():
         return 'Login failed.'
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    import sys
+    host = sys.argv[1] if len(sys.argv) > 1 else '127.0.0.1'
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
+    app.run(host, port, debug=True)

