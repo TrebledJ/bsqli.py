@@ -42,6 +42,8 @@ logger = logging.getLogger("bsqli")
 urllib3.disable_warnings()
 console = Console()
 
+verified_checks = False
+
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.3',
@@ -401,7 +403,9 @@ class SQLStringBrute:
             # Not even within range?
             return BSearchError.AboveMax
         
-        if self.sender.send(cond=f'{sql}<{min}', delay=delay, delayf=self.delayf):
+        if (min != 0 or (min == 0 and not verified_checks)) \
+            and self.sender.send(cond=f'{sql}<{min}', delay=delay, delayf=self.delayf):
+            # Note: verified_checks allows us to be more confident about errors, and skip checking for < 0.
             return BSearchError.BelowMin
 
         while min < max:
@@ -679,6 +683,8 @@ class Query:
                 logging.error(f"Sent condition {m}={n}, expected FALSE, but got TRUE.")
                 ok = False
         
+        global verified_checks
+        verified_checks = ok
         if ok:
             console.log("Checks passed.")
 
