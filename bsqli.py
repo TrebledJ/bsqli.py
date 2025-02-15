@@ -116,8 +116,8 @@ class BooleanResultParser(ResultParser):
         return resp.status_code != '404'
 
 
-def make_session(max_retries: int, proxy: Optional[str]) -> requests.Client():
-    s = requests.Client(
+def make_session(max_retries: int, proxy: Optional[str]) -> httpx.Client:
+    s = httpx.Client(
         verify=False,
         transport=httpx.HTTPTransport(
             retries=max_retries,
@@ -198,9 +198,8 @@ class Sender:
     def make_request(self, url, data):
         return self.session.request(self.method, url, data=data,
                                 timeout=self.timeout,
-                                verify=False,
                                 headers=self.headers,
-                                allow_redirects=self.allow_redirects)
+                                follow_redirects=self.allow_redirects)
         
 
 class DBMS(str, Enum):
