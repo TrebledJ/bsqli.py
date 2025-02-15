@@ -599,9 +599,13 @@ class Query:
         console.print(f"(+) retrieving {info}...")
         start = time.time()
 
-        if 'count' in sql[:40].lower():
-            logger.warning('Detected `count` query. Switching to (faster) numeric brute.')
-            res = self.brute.get_number(f'({sql})')
+        numeric_funcs = ['count', getattr(self.variant, "length").lower()]
+
+        for func in numeric_funcs:
+            if func in sql[:40].lower():
+                logger.warning(f'Detected [bold green]{func}[/] query. Switching to (faster) numeric brute.', extra={"markup": True})
+                res = self.brute.get_number(f'({sql})')
+                break
         else:
             if self.options.cast_to_string:
                 cast_len = self.options.cast_to_string_length
