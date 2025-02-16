@@ -351,6 +351,8 @@ class SQLStringBrute:
     quit_evt: Event = Event()
     delayf: Callable[[float], None] = time.sleep
 
+    _result_bytes: list[bytes] = field(default_factory=lambda: [])
+
     def mk_delayf(self):
         self.delayf = mk_thread_delay(self.int_evt, self.resume_evt, self.quit_evt, self.on_main_thread_int)
     
@@ -440,9 +442,13 @@ class SQLStringBrute:
     def format_bytes(xs: bytes) -> bytes:
         return b"".join(xs)
 
-    @staticmethod
-    def preview_bytes(xs: bytes) -> bytes | str:
-        bs = b"".join(xs)[:40]
+    def preview_bytes(self, length: Optional[int] = None, offset: Optional[int] = None) -> bytes | str:
+        if offset is None:
+            offset = 0
+        if length is None:
+            length = len(self._result_bytes)
+        bs = b"".join(self._result_bytes)[offset:offset+length]
+
         try:
             return bs.decode()
         except:
@@ -455,6 +461,7 @@ class SQLStringBrute:
         # as appropriate. Put get_length into a BinarySearch task as well, then we can interrupt its
         # sleep as if from a worker thread rather than main thread.
         self.reset_evts()
+        self._result_bytes = []
 
         # Since obtaining length is a single-threaded task, we can compensate for long delays by emulating multiple threads.
         # In the end, the request rate is the same.
@@ -499,7 +506,7 @@ class SQLStringBrute:
             logger.warning(f"The deduced length is {length}... that's a lot of chars to get in one go.")
             logger.warning(f"You may want to hit ^C early to think twice and refine the query.")
 
-        result_chars = [b'?'] * length
+        self._result_bytes = [b'?'] * length
 
 
         variant = variant_class[self.dbms]
@@ -507,7 +514,7 @@ class SQLStringBrute:
         SUBSTRING = getattr(variant, 'substring')
 
         with self.prog:
-            init_value = SQLStringBrute.preview_bytes(result_chars)
+            init_value = self.preview_bytes(length=40)
             task = self.prog.add_task("[green]inspecting...", value=init_value, total=length)
 
             def on_index_finished(idx):
@@ -516,21 +523,21 @@ class SQLStringBrute:
                         ch = future.result()
                         if not isinstance(ch, BSearchError):
                             # Update char to list.
-                            result_chars[idx] = bytes([ch])
+                            self._result_bytes[idx] = bytes([ch])
                     except ThreadInterruptException:
                         logger.debug(f'ThreadInterruptExecution for Char #{idx}')
-                    except Exception as exc:
-                        logger.warning(f'Char #{idx} generated an exception: {type(exc)} {exc}')
+                    except Exception as e:
+                        logger.warning(f'Char #{idx} generated an exception: {e.__class__.__name__} {e}')
                     else:
                         # self.prog.update doesn't check if the task is in available tasks.
                         # This may be an issue if we interrupted multithreading and some were just finishing.
                         if task in self.prog.task_ids:
-                            self.prog.update(task, value=SQLStringBrute.preview_bytes(result_chars), advance=1, refresh=True)
+                            self.prog.update(task, value=self.preview_bytes(length=40), advance=1, refresh=True)
                         if logger.getEffectiveLevel() <= logging.INFO:
                             if isinstance(ch, ResultError):
                                 self.prog.console.log(f"str[{idx}] = error ({ch})")
                             else:
-                                self.prog.console.log(f"str[{idx}] = {result_chars[idx]} ({ch})")
+                                self.prog.console.log(f"str[{idx}] = {self._result_bytes[idx]} ({ch})")
                 
                 return callback
 
@@ -573,7 +580,7 @@ class SQLStringBrute:
             
             self.prog.remove_task(task)
         
-        return SQLStringBrute.format_bytes(result_chars)
+        return SQLStringBrute.format_bytes(self._result_bytes)
 
     def get_number(self, sql):
         with self.prog:
@@ -663,7 +670,6 @@ class Query:
             logging.error(f"Got an error while making the test request: {e}")
             ok = False
         else:
-            logging.info(f"--> {res}")
             if not res:
                 logging.error("Unable to verify TRUE request.")
                 logging.error(f"Sent condition {n}={n}, expected TRUE, but got FALSE.")
@@ -677,16 +683,21 @@ class Query:
             logging.error(f"Got an error while making the test request: {e}")
             ok = False
         else:
-            logging.info(f"--> {res}")
             if res:
                 logging.error("Unable to verify FALSE request.")
                 logging.error(f"Sent condition {m}={n}, expected FALSE, but got TRUE.")
                 ok = False
         
-        global verified_checks
-        verified_checks = ok
         if ok:
             console.log("Checks passed.")
+
+        global verified_checks
+        if ok != verified_checks:
+            if ok:
+                console.log('Activated [green]verified_checks[/]. Requests will be slightly optimised now.')
+            else:
+                console.log('Turning off [red]verified_checks[/].')
+            verified_checks = ok
 
 
     def query_table(self, table, col):
@@ -882,6 +893,7 @@ def main():
         prog=Progress(
             TextColumn(f"[bold {Palette.primary}]{{task.fields[value]}}"),
             *Progress.get_default_columns(),
+            TextColumn(f"[bold {Palette.primary}]{{task.completed}}/{{task.total}}"),
             transient=True,
         ),
         dbms=args.dbms,
@@ -973,6 +985,7 @@ def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -
         console.print('Usage:')
         console.print('  [green]set[/] \\[thread|delay|timeout|loglevel] <value>')
         if paused_from_task:
+            console.print('  [green]status[/]')
             console.print('  [green]continue / c[/]')
         console.print('  [green]quit / q[/]')
     
@@ -1000,6 +1013,11 @@ def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -
                         continue
 
                     logger.setLevel(logging._nameToLevel[value.upper()])
+                case ['status']:
+                    if paused_from_task:
+                        console.print(brute.preview_bytes())
+                        continue
+                    help()
                 case ['q', *_] | ['quit', *_]:
                     if paused_from_task:
                         if confirm("cancel this operation"):
