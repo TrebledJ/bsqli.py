@@ -34,7 +34,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-VERSION = '0.6.0'
+VERSION = '0.6.1'
 
 logging.basicConfig(format="%(message)s", handlers=[RichHandler(log_time_format="[%X]")])
 logger = logging.getLogger("bsqli")
