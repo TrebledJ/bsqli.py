@@ -471,7 +471,7 @@ class SQLStringBrute:
             task = self.prog.add_task("[green]measuring...", value=str(max_len), total=int(math.log(max_len, 2)+1))
             try:
                 length = self.get_length(sql, max_len=max_len, task=task, delay=single_threaded_delay)
-            except (ThreadInterruptException, KeyboardInterrupt) as e:
+            except (ThreadInterruptException, KeyboardInterrupt, ResultError) as e:
                 self.prog.remove_task(task)
                 raise e # Re-raise to exit to main loop.
             
@@ -490,7 +490,7 @@ class SQLStringBrute:
                 task = self.prog.add_task("[green]measuring...", value=str(max_len), total=int(math.log(max_len, 2)+1))
                 try:
                     length = self.get_length(sql, min_len=min_len, max_len=max_len, task=task, delay=single_threaded_delay)
-                except (ThreadInterruptException, KeyboardInterrupt) as e:
+                except (ThreadInterruptException, KeyboardInterrupt, ResultError) as e:
                     self.prog.remove_task(task)
                     raise e # Re-raise to exit to main loop.
                 
@@ -584,11 +584,12 @@ class SQLStringBrute:
 
     def get_number(self, sql):
         with self.prog:
+            # TODO: start low then retry with higher number? Unify get_length and get_number?
             max_n = 32768
             task = self.prog.add_task("[green]measuring...", value=str(max_n), total=int(math.log(max_n, 2)+1))
             try:
                 num = self.get_by_bsearch(sql, min=0, max=max_n, task=task)
-            except KeyboardInterrupt as e:
+            except (ThreadInterruptException, KeyboardInterrupt, ResultError) as e:
                 self.prog.remove_task(task)
                 raise e # Re-raise to exit to main loop.
                
@@ -974,8 +975,8 @@ def main():
                     query.query(sql)
         except httpx.TimeoutException as e:
             console.print(f"Looks like the request timed out: {e}.")
-        except NotImplementedError as e:
-            console.print(f"Received NotImplementedError during task: {e}.")
+        except (NotImplementedError, ResultError) as e:
+            console.print(f"Received {e.__class__.__name__} during task: {e}.")
         except (KeyboardInterrupt, EOFError, ThreadInterruptException) as e:
             console.print(f"Received {e.__class__.__name__} during task.")
 
@@ -1004,6 +1005,8 @@ def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -
 
                     brute.max_threads = max(int(value), 1)
                 case ['set', 'delay', value]:
+                    if float(value) > 20:
+                        console.print('Bruh, are you sure? delay is in [bold]seconds[/]. Updating anyways...')
                     brute.delay = max(float(value), 0.0)
                 case ['set', 'timeout', value]:
                     sender.timeout = float(value)
