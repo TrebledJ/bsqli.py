@@ -380,9 +380,9 @@ class SQLStringBrute:
             prog.disable = False
             prog.update(prog.task_ids[0], visible=True, refresh=True)
 
-        self.int_evt.clear()
         disable_prog(self.prog)
         cont = config_loop(self.sender, self, paused_from_task=True)
+        self.int_evt.clear()
         if cont:
             self.quit_evt.clear()
         else:
