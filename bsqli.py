@@ -298,8 +298,8 @@ def mk_thread_delay(int_evt: Event, resume_evt: Event, quit_evt: Event, main_thr
         resume_evt.clear()
         int_evt.set()
 
-    signal.signal(signal.SIGTERM, handle_int_signal) # Unix-like
-    signal.signal(signal.SIGINT, handle_int_signal)  # Windows
+    # signal.signal(signal.SIGTERM, handle_int_signal)
+    signal.signal(signal.SIGINT, handle_int_signal)
     # signal.signal(signal.SIGABRT, lambda signo, _frame: print('SIGABRT called')) 
     # try: signal.signal(signal.SIGQUIT, lambda signo, _frame: print('SIGQUIT called')) 
     # except AttributeError: pass
@@ -365,7 +365,7 @@ class SQLStringBrute:
         self.resume_evt.clear()
         self.quit_evt.clear()
 
-    def on_main_thread_int(self) -> bool:
+    def on_main_thread_int(self, before_quit_cb: Callable[[], None] = lambda: None) -> bool:
         is_interactive = [False] # Use a list[bool] instead of simple bool to hack around Python's variable lookup.
 
         def disable_prog(prog):
@@ -383,11 +383,12 @@ class SQLStringBrute:
 
         disable_prog(self.prog)
         cont = config_loop(self.sender, self, paused_from_task=True)
-        self.int_evt.clear()
         if cont:
             self.quit_evt.clear()
         else:
+            before_quit_cb()
             self.quit_evt.set()
+        self.int_evt.clear()
         self.resume_evt.set()
         enable_prog(self.prog)
         return bool(cont)
@@ -518,61 +519,64 @@ class SQLStringBrute:
             init_value = self.preview_bytes(length=40)
             task = self.prog.add_task("[green]inspecting...", value=init_value, total=length)
 
-            def on_index_finished(idx):
-                def callback(future):
-                    try:
-                        ch = future.result()
-                        if not isinstance(ch, BSearchError):
-                            # Update char to list.
-                            self._result_bytes[idx] = bytes([ch])
-                    except ThreadInterruptException:
-                        logger.debug(f'ThreadInterruptExecution for Char #{idx}')
-                    except Exception as e:
-                        logger.warning(f'Char #{idx} generated an exception: {e.__class__.__name__} {e}')
-                    else:
-                        # self.prog.update doesn't check if the task is in available tasks.
-                        # This may be an issue if we interrupted multithreading and some were just finishing.
-                        if task in self.prog.task_ids:
-                            self.prog.update(task, value=self.preview_bytes(length=40), advance=1, refresh=True)
-                        if logger.getEffectiveLevel() <= logging.INFO:
-                            if isinstance(ch, ResultError):
-                                self.prog.console.log(f"str[{idx}] = error ({ch})")
-                            else:
-                                self.prog.console.log(f"str[{idx}] = {self._result_bytes[idx]} ({ch})")
-                
-                return callback
-
+            def handle_result(future):
+                try:
+                    idx, ch = future.result()
+                    if not isinstance(ch, BSearchError):
+                        # Update char to list.
+                        self._result_bytes[idx] = bytes([ch])
+                except ThreadInterruptException:
+                    logger.debug(f'ThreadInterruptExecution for Char #{idx}')
+                except Exception as e:
+                    logger.warning(f'Char #{idx} generated an exception: {e.__class__.__name__} {e}')
+                else:
+                    # self.prog.update doesn't check if the task is in available tasks.
+                    # This may be an issue if we interrupted multithreading and some were just finishing.
+                    if task in self.prog.task_ids:
+                        self.prog.update(task, value=self.preview_bytes(length=40), advance=1, refresh=True)
+                    if logger.getEffectiveLevel() <= logging.INFO:
+                        if isinstance(ch, ResultError):
+                            self.prog.console.log(f"str[{idx}] = error ({ch})")
+                        else:
+                            self.prog.console.log(f"str[{idx}] = {self._result_bytes[idx]} ({ch})")
+            
             try:
                 # Start threads.
                 with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_threads) as executor:
                     future_map = {}
 
+                    def wrapper(index, *args, **kwargs):
+                        return index, self.get_by_bsearch(index=index, *args, **kwargs)
+
                     # Create threads and on-complete handlers.
                     for idx in range(length):
                         f = executor.submit(
-                                self.get_by_bsearch,
+                                wrapper,
                                 sql=f"{ASCII}({SUBSTRING}(({sql}),{idx+1},1))",
                                 min=0,
                                 max=128,
                                 index=idx,
                                 delay=self.delay,
                             )
-                        f.add_done_callback(on_index_finished(idx))
                         future_map[f] = idx
                     
+                    not_done = future_map
                     while True:
-                        sets = concurrent.futures.wait(future_map, timeout=0.1)
-                        if len(sets.not_done) == 0:
+                        done, not_done = concurrent.futures.wait(not_done, timeout=0.1)
+                        for future in done:
+                            # Ensure future.result() is handled in main thread.
+                            handle_result(future)
+                            
+                        if len(not_done) == 0:
                             # All done!
                             logger.info('[main] All tasks done!')
                             break
 
                         if self.int_evt.is_set():
                             logger.debug('[main] Interrupt detected.')
-                            res = self.on_main_thread_int()
-                            if not res:
+                            if not self.on_main_thread_int(lambda: executor.shutdown(wait=False, cancel_futures=True)):
                                 # Quit.
-                                logger.info(f'[main] Quitting early. {len(sets.not_done)} tasks skipped...')
+                                logger.info(f'[main] Quitting early. {len(not_done)} tasks skipped...')
                                 break
                         
             except (KeyboardInterrupt, EOFError, ThreadInterruptException) as e:
