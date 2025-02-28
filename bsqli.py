@@ -20,7 +20,6 @@ from threading import Event
 import signal
 
 try:
-    import urllib3
     import httpx
     from rich.progress import *
     from rich.logging import RichHandler
@@ -30,16 +29,15 @@ except ImportError as e:
     print(e)
     print('Make sure you have the necessary packages:')
     print()
-    print('\tpip install urllib3 httpx rich prompt_toolkit')
+    print('\tpip install httpx rich prompt_toolkit')
     sys.exit(1)
 
 
-VERSION = '0.6.1'
+VERSION = '0.6.2'
 
 logging.basicConfig(format="%(message)s", handlers=[RichHandler(log_time_format="[%X]")])
 logger = logging.getLogger("bsqli")
 
-urllib3.disable_warnings()
 console = Console()
 
 verified_checks = False
@@ -47,7 +45,7 @@ verified_checks = False
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.3',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.3',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edge/124.0.0.',
     'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.5414.120 Safari/537.36 Avast/109.0.24252.12',
@@ -126,18 +124,6 @@ class BooleanResultParser(ResultParser[bool]):
         return resp.status_code != '404'
 
 
-def make_session(max_retries: int, proxy: Optional[str]) -> httpx.Client:
-    s = httpx.Client(
-        verify=False,
-        transport=httpx.HTTPTransport(
-            retries=max_retries,
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=100),
-        ),
-        proxy=proxy
-    )
-    return s
-
-
 class ThreadInterruptException(Exception): pass
 
 
@@ -147,7 +133,7 @@ COND_TOKEN = '{cond}'
 @dataclass(kw_only=True)
 class Sender:
     url: str
-    method: Literal["GET"] | Literal["POST"]
+    method: Literal["GET"] | Literal["POST"] | Literal["PUT"] | Literal["PATCH"] | Literal["DELETE"] | Literal["OPTIONS"]
     payload: SQLPayload
     data: Optional[str] = None
 
@@ -157,7 +143,10 @@ class Sender:
     allow_redirects: bool = False
     # keep_alive: bool = False
     
-    session: httpx.Client
+    max_retries: int
+    proxy: Optional[str]
+    is_proxy_enabled: bool
+    session: httpx.Client = field(init=False)
     
     retries_on_error: int = 0   # Number of retries if a response was marked as an error.
 
@@ -229,7 +218,19 @@ class Sender:
                                 timeout=self.timeout,
                                 headers=self.headers,
                                 follow_redirects=self.allow_redirects)
-        
+
+    def build_client(self):
+        """Builds a httpx client for the Sender, optionally override proxy settings."""
+        proxy = self.proxy if self.is_proxy_enabled else None
+        self.session = httpx.Client(
+            verify=False,
+            transport=httpx.HTTPTransport(
+                retries=self.max_retries,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=100),
+            ),
+            proxy=proxy
+        )
+    
 
 class DBMS(str, Enum):
     MySQL = "MySQL"
@@ -471,7 +472,7 @@ class SQLStringBrute:
             task = self.prog.add_task("[green]measuring...", value=str(max_len), total=int(math.log(max_len, 2)+1))
             try:
                 length = self.get_length(sql, max_len=max_len, task=task, delay=single_threaded_delay)
-            except (ThreadInterruptException, KeyboardInterrupt, ResultError) as e:
+            except Exception as e:
                 self.prog.remove_task(task)
                 raise e # Re-raise to exit to main loop.
             
@@ -490,7 +491,7 @@ class SQLStringBrute:
                 task = self.prog.add_task("[green]measuring...", value=str(max_len), total=int(math.log(max_len, 2)+1))
                 try:
                     length = self.get_length(sql, min_len=min_len, max_len=max_len, task=task, delay=single_threaded_delay)
-                except (ThreadInterruptException, KeyboardInterrupt, ResultError) as e:
+                except Exception as e:
                     self.prog.remove_task(task)
                     raise e # Re-raise to exit to main loop.
                 
@@ -589,7 +590,7 @@ class SQLStringBrute:
             task = self.prog.add_task("[green]measuring...", value=str(max_n), total=int(math.log(max_n, 2)+1))
             try:
                 num = self.get_by_bsearch(sql, min=0, max=max_n, task=task)
-            except (ThreadInterruptException, KeyboardInterrupt, ResultError) as e:
+            except Exception as e:
                 self.prog.remove_task(task)
                 raise e # Re-raise to exit to main loop.
                
@@ -759,10 +760,10 @@ def make_headers(args):
     if args.data and 'Content-Type' not in headers:
         headers['Content-Type'] = 'application/x-www-form-urlencoded'
     
-    # if args.keep_alive:
-    #     headers['Connection'] = 'keep-alive'
-    # else:
-    #     headers['Connection'] = 'close'
+    if args.keep_alive:
+        headers['Connection'] = 'keep-alive'
+    else:
+        headers['Connection'] = 'close'
     
     return headers
 
@@ -783,14 +784,14 @@ def main():
     parser.add_argument('--data', default='',
                         help='Url-encoded data to send with the request. Possibly containing an injection point marked with `{payload}`.')
     
-    parser.add_argument('-X', '--method', choices=["GET", "POST"], default='GET', help='GET or POST')
+    parser.add_argument('-X', '--method', choices=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], default='GET', help='HTTP method')
     parser.add_argument('-H', '--header', action='append', default=[], help='Extra headers to send with requests.')
-    parser.add_argument('--timeout', default=5, type=float, help='Timeout of each request.')
+    parser.add_argument('--timeout', default=10, type=float, help='Timeout of each request.')
     parser.add_argument('--payload', help='The SQLi payload.')
 
     parser.add_argument('--proxy', default=None, help='Send requests to a proxy. Example: http://127.0.0.1:8080.')
     parser.add_argument('--follow-redirects', action='store_true', help='Follows redirects in responses.')
-    # parser.add_argument('--keep-alive', action='store_true', help='Enables `Connection: keep-alive`.')
+    parser.add_argument('--keep-alive', action='store_true', help='Enables `Connection: keep-alive`. (May be buggy due to httpx connection pooling issues.)')
     parser.add_argument('--max-retries', default=3, type=int, help='Maximum number of HTTP connection retries to attempt.')
 
     parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.SQLite, DBMS.OracleSQL], help='The database management system.')
@@ -876,6 +877,8 @@ def main():
         case _:
             raise NotImplementedError()
         
+    is_proxy_enabled = (args.proxy is not None)
+    proxy = (args.proxy if args.proxy else 'http://127.0.0.1:8080')
     sender = Sender(
         url=args.url,
         method=args.method,
@@ -884,10 +887,13 @@ def main():
         data=args.data,
         timeout=args.timeout,
         allow_redirects=args.follow_redirects,
-        session=make_session(args.max_retries, args.proxy),
+        max_retries=args.max_retries,
+        proxy=proxy,
+        is_proxy_enabled=is_proxy_enabled,
         retries_on_error=args.max_retries_on_error,
         result_parser=parser,
     )
+    sender.build_client()
 
     brute = SQLStringBrute(
         sender=sender,
@@ -979,12 +985,16 @@ def main():
             console.print(f"Received {e.__class__.__name__} during task: {e}.")
         except (KeyboardInterrupt, EOFError, ThreadInterruptException) as e:
             console.print(f"Received {e.__class__.__name__} during task.")
+        except Exception as e:
+            console.print(f"An {e.__class__.__name__} occurred: {e}")
 
 
 def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -> bool | None:
     def help():
         console.print('Usage:')
-        console.print('  [green]set[/] \\[thread|delay|timeout|loglevel] <value>')
+        console.print('  [green]set[/] <thread|delay|timeout|loglevel> <value>')
+        console.print('  [green]proxy[/]')
+        console.print('  [green]proxy[/] <off|on|http://127.0.0.1:8080>')
         if paused_from_task:
             console.print('  [green]status[/]')
             console.print('  [green]continue / c[/]')
@@ -993,6 +1003,18 @@ def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -
     def confirm(op):
         ans = prompt(f"Are you sure you want to {op}? [y/N] ")
         return ans.lower().startswith('y')
+
+    def print_proxy_status():
+        if sender.is_proxy_enabled:
+            color, status = 'blue', 'on'
+        else:
+            color, status = 'red', 'off'
+        console.print(f"Proxy: [{color}]{sender.proxy}[/] ([{color}]{status}[/])")
+    
+    console.print()
+    console.print(f"Threads: {brute.max_threads} \tDelay: {brute.delay}s \tTimeout: {sender.timeout}s")
+    console.print(f"Log Level: {logging._levelToName[logger.getEffectiveLevel()]}")
+    print_proxy_status()
 
     while 1:
         try:
@@ -1005,22 +1027,46 @@ def config_loop(sender: Sender, brute: SQLStringBrute, paused_from_task=False) -
 
                     brute.max_threads = max(int(value), 1)
                 case ['set', 'delay', value]:
-                    if float(value) > 20:
-                        console.print('Bruh, are you sure? delay is in [bold]seconds[/]. Updating anyways...')
-                    brute.delay = max(float(value), 0.0)
+                    brute.delay = min(max(float(value), 0.0), 60)
+                    console.print(f"Delay: {brute.delay}s")
                 case ['set', 'timeout', value]:
-                    sender.timeout = float(value)
+                    sender.timeout = min(max(float(value), 0.0), 300)
+                    console.print(f"Timeout: {sender.timeout}s")
                 case ['set', 'loglevel', value]:
                     if value.upper() not in logging._nameToLevel:
                         console.print('Unknown log level.')
                         continue
 
                     logger.setLevel(logging._nameToLevel[value.upper()])
+
+                case ['proxy', value]:
+                    if value in ['off', 'on']:
+                        # Force enabled/disabled.
+                        sender.is_proxy_enabled = (value == 'on')
+                    elif '://' in value:
+                        sender.proxy = value
+                    sender.build_client()
+                    print_proxy_status()
+
+                case ['proxy']:
+                    # Toggle proxy.
+                    sender.is_proxy_enabled = not sender.is_proxy_enabled
+                    sender.build_client()
+                    print_proxy_status()
+
                 case ['status']:
                     if paused_from_task:
                         console.print(brute.preview_bytes())
                         continue
                     help()
+
+                case ['redo']:
+                    if paused_from_task:
+                        # Implement 'redo' functionality, to retry previously failed chars.
+                        console.print('Not implemented.')
+                        continue
+                    help()
+
                 case ['q', *_] | ['quit', *_]:
                     if paused_from_task:
                         if confirm("cancel this operation"):
