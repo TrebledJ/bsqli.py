@@ -1,5 +1,5 @@
 # bsqli.py
-A nifty little interactive, multi-threaded, boolean-based blind SQLi script for OSCP, CTF, and real-life engagements.
+A nifty little interactive, multi-threaded, boolean-based blind SQLi script suitable for OSCP, OSWE, CTFs, and real-life penetration testing engagements.
 
 This tool abstracts the tedious process of brute-forcing strings; and is primarily used to enumerate metadata (SQL version, DB name, host name) and tables. For instance, there may be some juicy credentials residing in some user table. Or we may want to simply perform a Proof-of-Concept for a client by grabbing the version banner.
 
@@ -53,7 +53,9 @@ Apart from that, just download/copy the file and you should be good to go!
    character, an internal SQL error, or rate-limiting (in which case, turn
    down the number of threads).
 
-6. To debug, turn on verbosity (-vv) to print the payload and conditions
+6. To debug, proxy to Burp (`config` -> `proxy` -> `^C` to toggle proxy
+   within the session, or restart with extra command line args) or
+   turn on verbosity (-vv) to print the payload and conditions
    being tested.
 
 ## Options ##
@@ -62,59 +64,67 @@ Apart from that, just download/copy the file and you should be good to go!
 options:
   -h, --help            show this help message and exit
   -V, --version         Print script version (default: False)
-  -u URL, --url URL     The url to scan, with the scheme (e.g. http://192.168.1.1/admin). Possibly  
-                        containing an injection point marked with `{payload}`. (default: None)      
-  --data DATA           Url-encoded data to send with the request. Possibly containing an
-                        injection point marked with `{payload}`. (default: )
-  -X {GET,POST}, --method {GET,POST}
-                        GET or POST (default: GET)
-  -H HEADER, --header HEADER
-                        Extra headers to send with requests. (default: [])
-  --timeout TIMEOUT     Timeout of each request. (default: 5)
+
+  -u, --url URL         The url to scan, with the scheme (e.g. http://192.168.1.1/admin). Possibly
+                        containing an injection point marked with `{payload}`. (default: None)
+  --data DATA           Url-encoded data to send with the request. Possibly containing an injection point
+                        marked with `{payload}`. (default: )
+  -X, --method {GET,POST,PUT,PATCH,DELETE,OPTIONS}
+                        HTTP method (default: GET)
+  -H, --header HEADER   Extra headers to send with requests. (default: [])
+
+  --timeout TIMEOUT     Timeout of each request. (default: 10)
   --payload PAYLOAD     The SQLi payload. (default: None)
-  --proxy PROXY         Send requests to a proxy. Example: http://127.0.0.1:8080. (default: None)   
+  --proxy PROXY         Send requests to a proxy. Example: http://127.0.0.1:8080. (default: None)
   --follow-redirects    Follows redirects in responses. (default: False)
+  --keep-alive          Enables `Connection: keep-alive`. (May be buggy due to httpx connection pooling
+                        issues.) (default: False)
   --max-retries MAX_RETRIES
                         Maximum number of HTTP connection retries to attempt. (default: 3)
-  --dbms {MySQL,SQLServer,SQLite,OracleSQL}
-                        The database management system. (default: None)
-  --strategy {B}        The strategy to use: Boolean. You don't have any other choice at this       
-                        moment. (default: B)
-  -t THREADS, --threads THREADS
+  --dbms {MySQL,SQLServer,SQLite,OracleSQL,PostgreSQL}
+                        The database management system. This is used to determine builtin functions such as
+                        SUBSTRING and ASCII, or special functions for pre-baked queries such as version()
+                        or current_user(). (default: None)
+  --strategy {B}        The strategy to use: Boolean. You don't have any other choice at this moment.
+                        (default: B)
+  -t, --threads THREADS
                         Number of threads to use. (default: 8)
-  -d DELAY, --delay DELAY
-                        Number of seconds to delay each thread between requests. (default: 0)       
+  -d, --delay DELAY     Number of seconds to delay each thread between requests. (default: 0)
   -v                    Verbosity. -v for INFO, -vv for DEBUG messages. (default: 0)
-  -bts BOOLEAN_TRUE_IF_STATUS, --boolean-true-if-status BOOLEAN_TRUE_IF_STATUS
-                        If the response returns the provided status, mark the response as TRUE.     
-                        All other statuses are FALSE. (default: None)
-  -bfs BOOLEAN_FALSE_IF_STATUS, --boolean-false-if-status BOOLEAN_FALSE_IF_STATUS
-                        If the response returns the provided status, mark the response as FALSE.    
-                        All other statuses are TRUE. (default: None)
-  -bttc BOOLEAN_TRUE_IF_TEXT_CONTAINS, --boolean-true-if-text-contains BOOLEAN_TRUE_IF_TEXT_CONTAINS
-                        If the response text contains the provided text, mark the response as       
-                        TRUE. Otherwise, FALSE. (default: None)
-  -bftc BOOLEAN_FALSE_IF_TEXT_CONTAINS, --boolean-false-if-text-contains BOOLEAN_FALSE_IF_TEXT_CONTAINS
-                        If the response text contains the provided text, mark the response as       
-                        FALSE. Otherwise, TRUE. (default: None)
-  -bes BOOLEAN_ERROR_IF_STATUS, --boolean-error-if-status BOOLEAN_ERROR_IF_STATUS
-                        If the provided statuses are encountered, mark the query as an error.       
-                        Accepts multiple arguments (e.g. -bes 400, -bes 401). (default: [])
-  -betc BOOLEAN_ERROR_IF_TEXT_CONTAINS, --boolean-error-if-text-contains BOOLEAN_ERROR_IF_TEXT_CONTAINS
-                        If the provided text is encountered in the response body, mark the query    
-                        as an error. Accepts multiple arguments. (default: [])
-  -betn BOOLEAN_ERROR_IF_TEXT_NOT_CONTAINS, --boolean-error-if-text-not-contains BOOLEAN_ERROR_IF_TEXT_NOT_CONTAINS
-                        If the provided text was NOT encountered in the response body, mark the     
-                        query as an error. Accepts multiple arguments. (default: [])
+
+  -bts, --boolean-true-if-status BOOLEAN_TRUE_IF_STATUS
+                        If the response returns the provided status, mark the response as TRUE. All other
+                        statuses are FALSE. (default: None)
+  -bfs, --boolean-false-if-status BOOLEAN_FALSE_IF_STATUS
+                        If the response returns the provided status, mark the response as FALSE. All other
+                        statuses are TRUE. (default: None)
+  -bttc, --boolean-true-if-text-contains BOOLEAN_TRUE_IF_TEXT_CONTAINS
+                        If the response text contains the provided text, mark the response as TRUE.
+                        Otherwise, FALSE. (default: None)
+  -bftc, --boolean-false-if-text-contains BOOLEAN_FALSE_IF_TEXT_CONTAINS
+                        If the response text contains the provided text, mark the response as FALSE.
+                        Otherwise, TRUE. (default: None)
+
+  -bes, --boolean-error-if-status BOOLEAN_ERROR_IF_STATUS
+                        If the provided statuses are encountered, mark the query as an error. You generally
+                        don't need to use these -be* error flags unless there are some weird network issues
+                        causing queries to intermittently fail. Accepts multiple arguments (e.g. -bes 400,
+                        -bes 401). (default: [])
+  -betc, --boolean-error-if-text-contains BOOLEAN_ERROR_IF_TEXT_CONTAINS
+                        If the provided text is encountered in the response body, mark the query as an
+                        error. Accepts multiple arguments. (default: [])
+  -betn, --boolean-error-if-text-not-contains BOOLEAN_ERROR_IF_TEXT_NOT_CONTAINS
+                        If the provided text was NOT encountered in the response body, mark the query as an
+                        error. Accepts multiple arguments. (default: [])
   --max-retries-on-error MAX_RETRIES_ON_ERROR
-                        Maximum number of retries if a response is marked as an error. (default:    
-                        3)
-  --cast-to-string      Cast the target output to varchar(2048) string. This allows numbers and     
-                        other data types to be treated as strings, so that our standard ASCII-      
-                        SUBSTRING algorithm can work. (default: False)
+                        Maximum number of retries if a response is marked as an error. (default: 3)
+
+  --cast-to-string      Cast the target output to varchar(2048) string. This allows numbers and other data
+                        types to be treated as strings, so that our standard ASCII-SUBSTRING algorithm can
+                        work. (default: False)
   --cast-to-string-length CAST_TO_STRING_LENGTH
-                        The length of the string to cast to. If you specify this, you should also   
-                        enable --cast-to-string. (default: 2048)
+                        The length of the string to cast to. If you specify this, you should also enable
+                        --cast-to-string. (default: 2048)
 ```
 
    
@@ -137,7 +147,7 @@ Upon entering the CLI, you have some options.
 
 2. Query table. This is a special pre-baked command which allows you to
    enumerate a table and their columns. This hasn't been optimised for
-   different versions yet (as some versions have special functions which can
+   different DBMS's yet (as some have special functions which can
    expedite this process).
 
    ```
@@ -242,7 +252,7 @@ Observations:
 - The server returns 302 if the SQLi is successful. (-bts 302)
   We'll use this to determine if a query resulted in TRUE/FALSE.
 - The server returns 500 if an error occurred (e.g. forbidden character,
-  SQL error). (-bes 500)
+  SQL error, timeout). (-bes 500)
   We'll use this to catch and discard false positives.
 
 Request:
