@@ -49,11 +49,16 @@ Apart from that, just download/copy the file and you should be good to go!
    instruct the script to ignore the response (and consider as NULL or '?')
    using the -bes, -betc, and -betn flags.
    
-   This is useful if the server sporadically returns 500 due to a forbidden
-   character, an internal SQL error, or rate-limiting (in which case, turn
+   This is useful if the server sporadically returns 500 due to network
+   issues, an internal SQL error, or rate-limiting (in which case, turn
    down the number of threads).
 
-6. To debug, proxy to Burp (`config` -> `proxy` -> `^C` to toggle proxy
+6. Start `bsqli.py` and enter `check` to send test requests. This
+   also optimises queries slightly by assuming bytes are >0, which will shave
+   off 1 request per binary search. This optimisation is disabled by
+   default, otherwise the program tends to behave as if everything is true.
+
+8. To debug, proxy to Burp (`config` -> `proxy` -> `^C` to toggle proxy
    within the session, or restart with extra command line args) or
    turn on verbosity (-vv) to print the payload and conditions
    being tested.
@@ -66,15 +71,19 @@ options:
   -V, --version         Print script version (default: False)
 
   -u, --url URL         The url to scan, with the scheme (e.g. http://192.168.1.1/admin). Possibly
-                        containing an injection point marked with `{payload}`. (default: None)
+                        containing an injection point marked with `{payload}`. Content from the --payload
+                        parameter will be substituted here. (default: None)
   --data DATA           Url-encoded data to send with the request. Possibly containing an injection point
-                        marked with `{payload}`. (default: )
+                        marked with `{payload}`. Content from the --payload parameter will be substituted
+                        here. (default: )
   -X, --method {GET,POST,PUT,PATCH,DELETE,OPTIONS}
                         HTTP method (default: GET)
   -H, --header HEADER   Extra headers to send with requests. (default: [])
+  --payload PAYLOAD     The SQLi payload, in unencoded form (e.g. ' or {cond} -- ). Arbitrary conditions
+                        will be substituted here depending on the query. The payload will be automagically
+                        url-encoded before substituting it into the request line/body. (default: None)
 
   --timeout TIMEOUT     Timeout of each request. (default: 10)
-  --payload PAYLOAD     The SQLi payload. (default: None)
   --proxy PROXY         Send requests to a proxy. Example: http://127.0.0.1:8080. (default: None)
   --follow-redirects    Follows redirects in responses. (default: False)
   --keep-alive          Enables `Connection: keep-alive`. (May be buggy due to httpx connection pooling
@@ -87,8 +96,7 @@ options:
                         or current_user(). (default: None)
   --strategy {B}        The strategy to use: Boolean. You don't have any other choice at this moment.
                         (default: B)
-  -t, --threads THREADS
-                        Number of threads to use. (default: 8)
+  -t, --threads THREADS Number of threads to use. (default: 8)
   -d, --delay DELAY     Number of seconds to delay each thread between requests. (default: 0)
   -v                    Verbosity. -v for INFO, -vv for DEBUG messages. (default: 0)
 
@@ -132,7 +140,7 @@ options:
 
 Upon entering the CLI, you have some options.
 
-1. Run pre-baked commands.
+1. Run pre-baked commands. Good for simple PoCs.
 
    ```
    sqli> v
@@ -167,8 +175,10 @@ Upon entering the CLI, you have some options.
    table> admin
    col> concat(id,0x7c,username,0x7c,password,0x7c,firstname,0x7c,lastname,0x7c,created_on)
    ```
+   It's probably better to hand-roll some group-concat or whatever though.
 
 3. Or if you want to go full Rambo with guns ablazing, use your own custom query. All queries are wrapped in a subquery.
+   You can enter queries normally without spaces, and they will be translated into an army of boolean queries, properly encoded.
 
    ```
    sqli> SELECT 1
