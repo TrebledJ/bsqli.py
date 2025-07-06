@@ -33,7 +33,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-VERSION = '0.6.2'
+VERSION = '0.6.3'
 
 logging.basicConfig(format="%(message)s", handlers=[RichHandler(log_time_format="[%X]")])
 logger = logging.getLogger("bsqli")
@@ -794,21 +794,21 @@ def main():
     parser.add_argument('-V', '--version', action='store_true', help='Print script version')
 
     parser.add_argument('-u', '--url', 
-                        help='The url to scan, with the scheme (e.g. http://192.168.1.1/admin). Possibly containing an injection point marked with `{payload}`.')
+                        help='The url to scan, with the scheme (e.g. http://192.168.1.1/admin). Possibly containing an injection point marked with `{payload}`. Content from the --payload parameter will be substituted here.')
     parser.add_argument('--data', default='',
-                        help='Url-encoded data to send with the request. Possibly containing an injection point marked with `{payload}`.')
+                        help='Url-encoded data to send with the request. Possibly containing an injection point marked with `{payload}`. Content from the --payload parameter will be substituted here.')
     
     parser.add_argument('-X', '--method', choices=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], default='GET', help='HTTP method')
     parser.add_argument('-H', '--header', action='append', default=[], help='Extra headers to send with requests.')
+    parser.add_argument('--payload', help='The SQLi payload, in unencoded form (e.g. \' or {cond} -- ). Arbitrary conditions will be substituted here depending on the query. The payload will be automagically url-encoded before substituting it into the request line/body.')
+    
     parser.add_argument('--timeout', default=10, type=float, help='Timeout of each request.')
-    parser.add_argument('--payload', help='The SQLi payload.')
-
     parser.add_argument('--proxy', default=None, help='Send requests to a proxy. Example: http://127.0.0.1:8080.')
     parser.add_argument('--follow-redirects', action='store_true', help='Follows redirects in responses.')
     parser.add_argument('--keep-alive', action='store_true', help='Enables `Connection: keep-alive`. (May be buggy due to httpx connection pooling issues.)')
     parser.add_argument('--max-retries', default=3, type=int, help='Maximum number of HTTP connection retries to attempt.')
 
-    parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.SQLite, DBMS.OracleSQL, DBMS.PostgreSQL], help='The database management system.')
+    parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.SQLite, DBMS.OracleSQL, DBMS.PostgreSQL], help='The database management system. This is used to determine builtin functions such as SUBSTRING and ASCII, or special functions for pre-baked queries such as version() or current_user().')
     parser.add_argument('--strategy', choices=["B"], default='B',
                         help='The strategy to use: Boolean. You don\'t have any other choice at this moment.')
     parser.add_argument('-t', '--threads', default=8, type=int, help='Number of threads to use.')
@@ -825,7 +825,7 @@ def main():
                         help='If the response text contains the provided text, mark the response as FALSE. Otherwise, TRUE.')
 
     parser.add_argument('-bes', '--boolean-error-if-status', action='append', default=[],
-                        help='If the provided statuses are encountered, mark the query as an error. Accepts multiple arguments (e.g. -bes 400, -bes 401).')
+                        help='If the provided statuses are encountered, mark the query as an error. You generally don\'t need to use these -be* error flags unless there are some weird network issues causing queries to intermittently fail. Accepts multiple arguments (e.g. -bes 400, -bes 401).')
     parser.add_argument('-betc', '--boolean-error-if-text-contains', action='append', default=[],
                         help='If the provided text is encountered in the response body, mark the query as an error. Accepts multiple arguments.')
     parser.add_argument('-betn', '--boolean-error-if-text-not-contains', action='append', default=[],
@@ -852,9 +852,8 @@ def main():
         print(VERSION)
         return
 
-    if args.url is None:
-        parser.print_help()
-        return 1
+    assert args.url is not None, 'Please provide an --url parameter.'
+    assert args.payload, 'Please provide a --payload parameter.'
     
     match args.v:
         case 0:
