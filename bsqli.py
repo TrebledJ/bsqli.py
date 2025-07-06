@@ -192,7 +192,7 @@ class Sender:
         
         if PAYLOAD_TOKEN in url:
             raw_payload = self.payload.construct(cond=cond)
-            quoted_payload = quote_plus(raw_payload)
+            quoted_payload = quote(raw_payload)
             url = url.replace(PAYLOAD_TOKEN, quoted_payload)
         elif data and PAYLOAD_TOKEN in data:
             raw_payload = self.payload.construct(cond=cond)
@@ -237,6 +237,7 @@ class DBMS(str, Enum):
     SQLServer = "SQLServer"
     SQLite = "SQLite"
     OracleSQL = "OracleSQL"
+    PostgreSQL = "PostgreSQL"
     def __str__(self):
         return self.value
 
@@ -274,12 +275,21 @@ class OracleSQLVariant(SQLVariant):
     host_name = None
     substring = 'SUBSTR'
 
+class PostgreSQLVariant(SQLVariant):
+    version = 'version()'
+    current_user = 'current_user'
+    database_name = 'CURRENT_DATABASE()'
+    server_name = None
+    host_name = None
+    substring = 'SUBSTR'
+
 
 variant_class = {
     DBMS.MySQL: MySQLVariant,
     DBMS.SQLServer: SQLServerVariant,
     DBMS.SQLite: SQLiteVariant,
     DBMS.OracleSQL: OracleSQLVariant,
+    DBMS.PostgreSQL: PostgreSQLVariant,
 }
 
 
@@ -798,7 +808,7 @@ def main():
     parser.add_argument('--keep-alive', action='store_true', help='Enables `Connection: keep-alive`. (May be buggy due to httpx connection pooling issues.)')
     parser.add_argument('--max-retries', default=3, type=int, help='Maximum number of HTTP connection retries to attempt.')
 
-    parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.SQLite, DBMS.OracleSQL], help='The database management system.')
+    parser.add_argument('--dbms', choices=[DBMS.MySQL, DBMS.SQLServer, DBMS.SQLite, DBMS.OracleSQL, DBMS.PostgreSQL], help='The database management system.')
     parser.add_argument('--strategy', choices=["B"], default='B',
                         help='The strategy to use: Boolean. You don\'t have any other choice at this moment.')
     parser.add_argument('-t', '--threads', default=8, type=int, help='Number of threads to use.')
